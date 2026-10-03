@@ -56,7 +56,11 @@ Redelivery: if the worker dies before ack, RabbitMQ delivers the same message ag
 
 Retries do not use an immediate requeue. A retryable failure sets `NextAttemptAt` and a scheduler publishes the job again when it is due. That is how backoff exists without a delay plugin.
 
-## State machine (planned)
+## State machine
+
+Implemented in `Job` and `JobTransitions`. There is still no database and no worker, so this runs in memory inside the unit tests.
+
+`MarkQueued` publishes a `Pending` or `RetryScheduled` job. `RetryManually` is the only way back from `Failed` or `DeadLettered`, and it does not reset `AttemptCount` or `MaxAttempts`. `RecordRetryableFailure` schedules `NextAttemptAt` when attempts remain, and moves straight to `DeadLettered` when `AttemptCount` has reached `MaxAttempts`. The delay is an argument. The backoff policy is Phase 4.
 
 Normal:
 
@@ -73,6 +77,10 @@ Permanent failure:
 Attempts exhausted:
 
 `Processing` or `RetryScheduled -> DeadLettered`
+
+Manual retry, without changing the attempt budget:
+
+`Failed` or `DeadLettered -> Queued`
 
 A job, a RabbitMQ message, and an attempt are different things. One job has many attempts. One attempt is caused by a delivery, but a delivery of an already finished job creates no new attempt.
 

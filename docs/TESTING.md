@@ -4,7 +4,7 @@
 
 | Project | What it proves |
 | --- | --- |
-| `tests/TaskFlow.UnitTests` | Domain has no TaskFlow dependencies. Application references Domain only. Infrastructure references Application and Domain only. |
+| `tests/TaskFlow.UnitTests` | Domain has no TaskFlow dependencies. Application references Domain only. Infrastructure references Application and Domain only. `Job` accepts only the legal status graph: success, retry scheduling, permanent failure, exhausted attempts, manual retry, and rejected or out-of-order calls leave the job unchanged. |
 | `tests/TaskFlow.IntegrationTests` | The API host starts. `GET /` returns the phase 0 skeleton. The API assembly references Application and Infrastructure. |
 
 Command:
@@ -15,7 +15,7 @@ dotnet test TaskFlow.slnx
 
 `scripts/verify.sh` builds, then tests.
 
-On 2026-10-03 with SDK 10.0.401: build 0 warnings, 5 tests passed.
+On 2026-10-03 with SDK 10.0.401: build 0 warnings, 37 tests passed (35 unit, 2 integration).
 
 There are no Testcontainers yet. Nothing in the suite talks to SQL Server or RabbitMQ, because those integrations do not exist. Do not add a fake broker so a test can go green.
 

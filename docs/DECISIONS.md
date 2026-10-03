@@ -49,7 +49,7 @@ These ADRs record choices that are already made. The implementation status says 
 
 ## ADR-006: Database-backed job state
 
-- Status: Accepted. Implementation: not started (Phase 1 model, Phase 2 schema).
+- Status: Accepted. Implementation: the in-memory model exists (`Job`, `JobAttempt`). The SQL Server schema does not.
 - Context: The queue message is not a good system of record. It can be redelivered, and it should stay small.
 - Decision: SQL Server stores the job, the attempts, and the next retry time. RabbitMQ stores only enough to find the job.
 - Alternatives: Keep status only in the message headers. Use the queue depth as the status API.
