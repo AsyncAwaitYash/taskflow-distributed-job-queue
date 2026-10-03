@@ -23,6 +23,15 @@ Status: **done** (2026-10-03).
 
 ## Phase 2 — API and SQL Server
 
+Status: **done** (2026-10-03).
+
+- EF Core maps `Job` and `JobAttempt`. Migration `InitialJobSchema` creates `Jobs` and `JobAttempts`.
+- `POST /api/v1/jobs`, `GET /api/v1/jobs`, and `GET /api/v1/jobs/{id}`
+- New jobs stay `Pending`. Nothing is published to RabbitMQ.
+- Swagger, Problem Details, pagination, and filters for status, type, and created time
+
+## Phase 3 — RabbitMQ and worker
+
 Status: **next**.
 
 - ASP.NET Core job endpoints
