@@ -1,0 +1,15 @@
+---
+description: SQL Server, EF Core, and Dapper rules
+globs: "src/TaskFlow.Infrastructure/**/*.cs,docs/DATABASE.md"
+alwaysApply: false
+---
+
+# Database
+
+- SQL Server is the system of record. RabbitMQ is transport.
+- EF Core is used for writes and migrations. Dapper is reserved for read-heavy queries, not for a second write model.
+- Status changes go through explicit transitions. Do not assign an arbitrary status.
+- Claim, attempt, retry, and terminal updates that must succeed or fail together use a transaction.
+- Add an index only for a query the code runs. The retry scheduler query needs `Status` plus `NextAttemptAt`.
+- Do not scan the whole Jobs table to find due retries.
+- Document the window between a SQL commit and a RabbitMQ publish until an outbox exists.

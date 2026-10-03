@@ -1,0 +1,16 @@
+---
+description: RabbitMQ acknowledgement, retry, and redelivery rules
+globs: "src/**/*.cs,docs/ARCHITECTURE.md"
+alwaysApply: false
+---
+
+# Messaging
+
+- Topology stays small: exchange `taskflow.jobs`, queue `taskflow.jobs.process`, routing key `job.process`.
+- Messages carry a job id and small metadata. The payload lives in SQL Server.
+- Use manual acknowledgement. Ack only after the job outcome is durable.
+- A terminal job that is redelivered is acknowledged and not executed again.
+- Retryable failures are scheduled with `NextAttemptAt`. Do not `BasicNack(requeue: true)` in a loop.
+- Do not use RabbitMQ delayed-message plugins.
+- Multiple workers are competing consumers. Protect claims with database compare-and-update, not a lock manager.
+- At-least-once delivery is the model. Do not claim exactly-once.

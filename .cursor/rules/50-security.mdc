@@ -1,0 +1,14 @@
+---
+description: Secrets, input, and logging limits
+alwaysApply: true
+---
+
+# Security
+
+- Never commit secrets, connection strings with passwords, or a filled-in `.env`.
+- `.env.example` contains placeholders only.
+- Read configuration from the environment. Do not hard-code credentials.
+- Validate API input. Reject unknown job types and oversized payloads once submission exists.
+- Do not log credentials, tokens, or raw payloads.
+- Do not add an authentication subsystem unless a later task explicitly asks for one.
+- Document security limits in `docs/SECURITY.md` instead of implying the API is safe for the public internet.

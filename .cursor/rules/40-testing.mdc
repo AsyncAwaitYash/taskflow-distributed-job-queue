@@ -1,0 +1,13 @@
+---
+description: What TaskFlow tests must cover
+globs: "tests/**/*.cs"
+alwaysApply: false
+---
+
+# Testing
+
+- Test behavior: transitions, retry classification, backoff bounds, idempotent redelivery, and handler resolution.
+- Integration tests use real SQL Server and RabbitMQ via Testcontainers once those dependencies exist. Do not fake the queue in production code to make a test pass.
+- Cover duplicate delivery, two workers claiming one job, permanent failure, and max attempts.
+- Run the relevant tests before calling a task done. `scripts/verify.sh` is the full check.
+- Do not add tests that only assert a constructor exists.
