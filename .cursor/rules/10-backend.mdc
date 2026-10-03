@@ -1,0 +1,15 @@
+---
+description: C# and ASP.NET Core conventions
+globs: "**/*.cs"
+alwaysApply: false
+---
+
+# Backend
+
+- Use async methods for I/O and accept a `CancellationToken`. Pass it through.
+- Register services with dependency injection. Do not new up infrastructure from business code.
+- Controllers and minimal-API handlers stay thin. Business decisions live in the application layer.
+- Domain and Application projects must not reference Infrastructure, the API, or the worker.
+- Prefer enum or state types over magic strings for job status and attempt outcome.
+- Validate input at the boundary. Return Problem Details for API errors once the job API exists.
+- Do not log secrets or full job payloads.

@@ -1,0 +1,13 @@
+---
+description: TaskFlow source of truth and task size
+alwaysApply: true
+---
+
+# Project
+
+- The repository is the source of truth. Read `AGENTS.md` and `docs/CURRENT_STATE.md` before editing.
+- Implement the next incomplete task from `docs/MASTER_PLAN.md`. Do not build later phases in the same change.
+- Do not modify unrelated code.
+- When code and docs disagree, trust the code and tests, then correct the docs.
+- Update `docs/CURRENT_STATE.md` and `docs/LEARNING_GUIDE.md` in the same change as the behavior.
+- Do not mark planned behavior as implemented.

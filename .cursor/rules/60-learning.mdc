@@ -1,0 +1,12 @@
+---
+description: Keep the learning guide tied to the code
+alwaysApply: true
+---
+
+# Learning
+
+- After every meaningful task, add a `## Task: <name>` section to `docs/LEARNING_GUIDE.md`.
+- Explain what was built, why, the flow, the analogy, the code locations, failure behavior, tradeoffs, and interview questions.
+- Tie every explanation to TaskFlow files. Do not paste generic theory.
+- Label behavior that is not in code as planned.
+- Interview answers may describe only what the code and tests do.
