@@ -32,20 +32,20 @@ Status: **done** (2026-10-03).
 
 ## Phase 3 — RabbitMQ and worker
 
-Status: **in progress**.
+Status: **done** (2026-10-03).
 
 - Task 1, **done** (2026-10-03): exchange `taskflow.jobs`, queue `taskflow.jobs.process`, routing key `job.process`, and the confirmed publisher. `Job.MarkQueued` runs only after the broker confirms. A failed publish leaves the row `Pending` and returns 503. `RabbitMQ.Client` 7.2.2 is pinned.
 - Task 2, **done** (2026-10-03): worker consumer with manual ack and prefetch 1. Ack after the outcome is saved. `Pending` deliveries are promoted, other non-`Queued` deliveries are skipped.
 - Task 3, **done** (2026-10-03, same change as task 2): `IJobHandler`, `JobHandlerRegistry`, and the handlers that succeed or fail permanently. `demo.transient-failure` waits for Phase 4.
-- Task 4, **next**: competing consumers (two worker processes) and the end-to-end happy path
+- Task 4, **done** (2026-10-03): competing consumers proven with two worker hosts in `CompetingConsumersTests`, end-to-end happy path across every handler, and a two-process manual run recorded in `docs/DEMO.md`. Fixed along the way: a reader/writer deadlock (migration `EnableReadCommittedSnapshot`) and `dotnet ef database update` ignoring `ConnectionStrings__TaskFlow`.
 
 ## Phase 4 — Reliability
 
-- Failure classification
-- Exponential backoff with jitter, configured rather than hard-coded
-- `NextAttemptAt` retry scheduler and its index
-- Dead-letter state
-- `POST /api/v1/jobs/{id}/retry`
+Status: **next**.
+
+- Task 1, **next**: failure classification (retryable versus permanent, including unexpected exceptions) and the exponential backoff with jitter policy, configured rather than hard-coded. The worker records `RetryScheduled` with `NextAttemptAt` through `Job.RecordRetryableFailure`, and `DeadLettered` when attempts run out. Add the `demo.transient-failure` handler.
+- Task 2: the `NextAttemptAt` retry scheduler and its filtered `(Status, NextAttemptAt)` index. It conditionally moves due jobs to `Queued` and publishes them.
+- Task 3: `POST /api/v1/jobs/{id}/retry` for `Failed` and `DeadLettered` jobs, `409` when the status cannot transition.
 
 ## Phase 5 — Idempotency and concurrency
 

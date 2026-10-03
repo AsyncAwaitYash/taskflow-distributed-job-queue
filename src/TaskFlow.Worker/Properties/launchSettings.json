@@ -7,6 +7,22 @@
       "environmentVariables": {
         "DOTNET_ENVIRONMENT": "Development"
       }
+    },
+    "worker-1": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development",
+        "TaskFlow__Worker__WorkerId": "worker-1"
+      }
+    },
+    "worker-2": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development",
+        "TaskFlow__Worker__WorkerId": "worker-2"
+      }
     }
   }
 }

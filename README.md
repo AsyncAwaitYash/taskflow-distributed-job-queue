@@ -2,7 +2,7 @@
 
 TaskFlow is a small, production-style **distributed background job queue**. A client will submit a job to an ASP.NET Core API. The API will store the job in SQL Server and hand the work to RabbitMQ. Workers will process jobs, acknowledge messages manually, retry failures with exponential backoff and jitter, and dead-letter jobs that keep failing.
 
-**Phases 0–2 and most of Phase 3 are in the repository.** Jobs are stored in SQL Server and published to RabbitMQ. A job is `Queued` only after the broker confirms. A worker process consumes the queue, runs the handler, saves `Succeeded` or `Failed`, and then acks. Retries are Phase 4.
+**Phases 0–3 are in the repository.** Jobs are stored in SQL Server and published to RabbitMQ. A job is `Queued` only after the broker confirms. A worker process consumes the queue, runs the handler, saves `Succeeded` or `Failed`, and then acks. Retries are Phase 4.
 
 ## Status
 
@@ -12,7 +12,7 @@ TaskFlow is a small, production-style **distributed background job queue**. A cl
 | `Job` / `JobAttempt` state machine | Unit-tested |
 | SQL Server schema and job API | Create, list, and get |
 | RabbitMQ topology and confirmed publisher | Built. New jobs are `Queued` |
-| Worker with manual ack and job handlers | Built. One process tested; two at once is next |
+| Worker with manual ack and job handlers | Built. Two workers compete for one queue |
 | Retries, backoff, dead-lettering | Not implemented |
 | Docker Compose | Not implemented |
 | Serilog, health checks, OpenTelemetry | Not implemented |
@@ -28,7 +28,7 @@ dotnet test TaskFlow.slnx
 dotnet run --project src/TaskFlow.Api
 ```
 
-The API listens on `http://localhost:8080`. Swagger is at `http://localhost:8080/swagger`. Without `ConnectionStrings:TaskFlow`, `GET /api/v1/jobs` returns 503. To store jobs, point that connection string at SQL Server and run:
+The API listens on `http://localhost:8080`. Swagger is at `http://localhost:8080/swagger`. Without `ConnectionStrings:TaskFlow`, `GET /api/v1/jobs` returns 503. To store jobs, set `ConnectionStrings__TaskFlow` in the environment (`dotnet ef` reads it from there) and run:
 
 ```bash
 dotnet tool restore
@@ -39,11 +39,14 @@ dotnet ef database update --project src/TaskFlow.Infrastructure --startup-projec
 
 To submit jobs, also set `ConnectionStrings:RabbitMq` to an `amqp://` URI for a running broker (see [.env.example](.env.example)). Without it, `POST /api/v1/jobs` returns 503 and stores nothing. List and get still work.
 
-To run the jobs, start the worker with the same two connection strings. It refuses to start without them.
+To run the jobs, start the worker with the same two connection strings. It refuses to start without them. Start a second one with a different id to see competing consumers.
 
 ```bash
-dotnet run --project src/TaskFlow.Worker
+dotnet run --project src/TaskFlow.Worker --launch-profile worker-1
+dotnet run --project src/TaskFlow.Worker --launch-profile worker-2
 ```
+
+[docs/DEMO.md](docs/DEMO.md) is the full PowerShell walkthrough, from `docker run` to two workers sharing jobs, with the output it produced.
 
 `scripts/verify.sh` builds the solution and runs the tests.
 

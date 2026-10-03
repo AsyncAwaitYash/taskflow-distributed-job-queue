@@ -89,6 +89,13 @@ The API is the front door. It writes the job to SQL Server, which is the system 
 - Short answer (today): The worker acks after `JobProcessor` has saved `Succeeded` or `Failed`. `WorkerTests` checks the queue is empty afterwards.
 - Detail: Ack tells the broker the message can be deleted. We ack after the database has the outcome. Ack is not the same word as "the handler succeeded": a permanent failure is also acked, after the job is `Failed` or `DeadLettered`, so the poison message does not spin.
 
+### How do two workers share the work?
+
+- Short answer: They are competing consumers on one queue. RabbitMQ gives each message to one of them, not a copy to each. With prefetch 1, a worker that has not acked is not offered another message, so the next one goes to the idle worker.
+- TaskFlow example: `CompetingConsumersTests` submits 8 one-second jobs to `worker-a` and `worker-b`. Every job ends with one attempt, and both worker ids appear. The manual two-process run in `docs/DEMO.md` alternated worker-1 and worker-2.
+- Follow-up: Does that make it exactly-once?
+- Deeper answer: No. It shows normal delivery spreads work. A redelivery can still reach a second worker while the first is mid-job. The row's status check catches a finished job, but the claim is not conditional yet, so two workers holding the same `Queued` job at the same moment could both run it. Phase 5 adds the compare-and-update claim.
+
 ## Distributed systems and reliability
 
 ### Why can a message be processed twice?

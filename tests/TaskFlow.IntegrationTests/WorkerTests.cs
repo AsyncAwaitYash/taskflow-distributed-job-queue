@@ -1,18 +1,12 @@
-using System.Net;
-using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 
-using TaskFlow.Application;
 using TaskFlow.Domain.Jobs;
-using TaskFlow.Infrastructure;
 using TaskFlow.Infrastructure.Messaging;
 using TaskFlow.Infrastructure.Persistence;
 
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
 using RabbitMQ.Client;
@@ -22,8 +16,6 @@ namespace TaskFlow.IntegrationTests;
 [Collection(InfrastructureCollection.Name)]
 public sealed class WorkerTests : IAsyncLifetime
 {
-    private static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(30);
-
     private readonly SqlServerFixture _sql;
     private readonly RabbitMqFixture _rabbit;
     private readonly WebApplicationFactory<Program> _api;
@@ -44,19 +36,8 @@ public sealed class WorkerTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        HostApplicationBuilder builder = Host.CreateApplicationBuilder();
-        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
-        {
-            ["ConnectionStrings:TaskFlow"] = _sql.ConnectionString,
-            ["ConnectionStrings:RabbitMq"] = _rabbit.ConnectionString,
-            ["TaskFlow:Worker:WorkerId"] = "test-worker"
-        });
-        builder.Services.AddTaskFlowApplication(builder.Configuration);
-        TaskFlowInfrastructureStatus infrastructure = builder.Services.AddTaskFlowInfrastructure(builder.Configuration, "taskflow-worker-test");
-        builder.Services.AddTaskFlowJobConsumer(builder.Configuration, infrastructure);
-
-        _worker = builder.Build();
-        await _worker.StartAsync();
+        _worker = await TestWorkerHost.StartAsync(_sql, _rabbit, "test-worker");
+        await TestWorkerHost.WaitForConsumersAsync(_rabbit, 1);
     }
 
     public async Task DisposeAsync()
@@ -69,9 +50,9 @@ public sealed class WorkerTests : IAsyncLifetime
     [Fact]
     public async Task A_submitted_job_is_run_once_saved_as_succeeded_and_acked()
     {
-        Guid jobId = await SubmitAsync("demo.success", new { message = "hello" });
+        Guid jobId = await TestJobApi.SubmitAsync(_client, "demo.success", new { message = "hello" });
 
-        JsonElement job = await WaitForStatusAsync(jobId, "Succeeded");
+        JsonElement job = await TestJobApi.WaitForStatusAsync(_client, jobId, "Succeeded");
 
         JsonElement attempt = Assert.Single(job.GetProperty("attempts").EnumerateArray());
         Assert.Equal(1, attempt.GetProperty("attemptNumber").GetInt32());
@@ -79,15 +60,15 @@ public sealed class WorkerTests : IAsyncLifetime
         Assert.Equal("Succeeded", attempt.GetProperty("outcome").GetString());
 
         await StopWorkerAsync();
-        Assert.Equal(0u, await ReadyMessageCountAsync());
+        Assert.Equal(0u, await TestWorkerHost.ReadyMessageCountAsync(_rabbit));
     }
 
     [Fact]
     public async Task A_permanent_failure_is_saved_as_failed()
     {
-        Guid jobId = await SubmitAsync("demo.permanent-failure", new { });
+        Guid jobId = await TestJobApi.SubmitAsync(_client, "demo.permanent-failure", new { });
 
-        JsonElement job = await WaitForStatusAsync(jobId, "Failed");
+        JsonElement job = await TestJobApi.WaitForStatusAsync(_client, jobId, "Failed");
 
         JsonElement attempt = Assert.Single(job.GetProperty("attempts").EnumerateArray());
         Assert.Equal("PermanentFailure", attempt.GetProperty("outcome").GetString());
@@ -97,18 +78,18 @@ public sealed class WorkerTests : IAsyncLifetime
     [Fact]
     public async Task A_duplicate_message_for_a_succeeded_job_is_acked_without_a_second_attempt()
     {
-        Guid jobId = await SubmitAsync("demo.success", new { });
-        await WaitForStatusAsync(jobId, "Succeeded");
+        Guid jobId = await TestJobApi.SubmitAsync(_client, "demo.success", new { });
+        await TestJobApi.WaitForStatusAsync(_client, jobId, "Succeeded");
 
         await PublishRawAsync(JsonSerializer.SerializeToUtf8Bytes(
             new { jobId, type = "demo.success", correlationId = "duplicate" }));
-        Guid marker = await SubmitAsync("demo.success", new { });
-        await WaitForStatusAsync(marker, "Succeeded");
+        Guid marker = await TestJobApi.SubmitAsync(_client, "demo.success", new { });
+        await TestJobApi.WaitForStatusAsync(_client, marker, "Succeeded");
         await StopWorkerAsync();
 
-        JsonElement job = await GetJobAsync(jobId);
+        JsonElement job = await TestJobApi.GetJobAsync(_client, jobId);
         Assert.Single(job.GetProperty("attempts").EnumerateArray());
-        Assert.Equal(0u, await ReadyMessageCountAsync());
+        Assert.Equal(0u, await TestWorkerHost.ReadyMessageCountAsync(_rabbit));
     }
 
     [Fact]
@@ -124,7 +105,7 @@ public sealed class WorkerTests : IAsyncLifetime
         await PublishRawAsync(JsonSerializer.SerializeToUtf8Bytes(
             new { jobId = pending.Id, type = pending.Type, correlationId = pending.CorrelationId }));
 
-        JsonElement job = await WaitForStatusAsync(pending.Id, "Succeeded");
+        JsonElement job = await TestJobApi.WaitForStatusAsync(_client, pending.Id, "Succeeded");
         Assert.Single(job.GetProperty("attempts").EnumerateArray());
     }
 
@@ -133,44 +114,11 @@ public sealed class WorkerTests : IAsyncLifetime
     {
         await PublishRawAsync(Encoding.UTF8.GetBytes("not json"));
 
-        Guid marker = await SubmitAsync("data.process", new { rows = 3 });
-        await WaitForStatusAsync(marker, "Succeeded");
+        Guid marker = await TestJobApi.SubmitAsync(_client, "data.process", new { rows = 3 });
+        await TestJobApi.WaitForStatusAsync(_client, marker, "Succeeded");
         await StopWorkerAsync();
 
-        Assert.Equal(0u, await ReadyMessageCountAsync());
-    }
-
-    private async Task<Guid> SubmitAsync(string type, object payload)
-    {
-        HttpResponseMessage response = await _client.PostAsJsonAsync("/api/v1/jobs", new { type, payload });
-        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
-        JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
-        return body.GetProperty("id").GetGuid();
-    }
-
-    private async Task<JsonElement> GetJobAsync(Guid jobId)
-    {
-        return await _client.GetFromJsonAsync<JsonElement>($"/api/v1/jobs/{jobId}");
-    }
-
-    private async Task<JsonElement> WaitForStatusAsync(Guid jobId, string status)
-    {
-        DateTime deadline = DateTime.UtcNow + WaitLimit;
-        JsonElement job;
-        do
-        {
-            job = await GetJobAsync(jobId);
-            if (job.GetProperty("status").GetString() == status)
-            {
-                return job;
-            }
-
-            await Task.Delay(TimeSpan.FromMilliseconds(200));
-        }
-        while (DateTime.UtcNow < deadline);
-
-        Assert.Fail($"Job {jobId} stayed {job.GetProperty("status").GetString()} instead of reaching {status}.");
-        return job;
+        Assert.Equal(0u, await TestWorkerHost.ReadyMessageCountAsync(_rabbit));
     }
 
     private async Task PublishRawAsync(byte[] body)
@@ -187,23 +135,9 @@ public sealed class WorkerTests : IAsyncLifetime
             body);
     }
 
-    private async Task<uint> ReadyMessageCountAsync()
-    {
-        await using IConnection connection = await _rabbit.ConnectAsync();
-        await using IChannel channel = await connection.CreateChannelAsync();
-        QueueDeclareOk queue = await channel.QueueDeclarePassiveAsync(RabbitMqTopology.ProcessQueue);
-        return queue.MessageCount;
-    }
-
     private async Task StopWorkerAsync()
     {
-        if (_worker is null)
-        {
-            return;
-        }
-
-        await _worker.StopAsync();
-        _worker.Dispose();
+        await TestWorkerHost.StopAsync(_worker);
         _worker = null;
     }
 }

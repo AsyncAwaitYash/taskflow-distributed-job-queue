@@ -4,7 +4,7 @@ This is the textbook for the repository. If a sentence describes behavior, the c
 
 ## What is TaskFlow?
 
-**Status: jobs are stored in SQL Server, published to RabbitMQ, and run by one worker process that acks after saving the outcome. Retries and a second worker are not built.**
+**Status: jobs are stored in SQL Server, published to RabbitMQ, and run by one or more competing worker processes that ack after saving the outcome. Retries are not built.**
 
 TaskFlow will be a small background-job system. A client will ask an API to do something that should not block the HTTP call, such as "send this email" or "generate this report". The API will remember the job. A worker process, running separately, will do it later.
 
@@ -84,7 +84,7 @@ The worker pulls a message, loads the job from SQL Server, does the work, saves 
 | 0 (done) | How the solution is cut into layers, and why the docs are part of the project |
 | 1 (done) | What a job is, what an attempt is, and which status changes are legal |
 | 2 (done) | How an HTTP request becomes a row |
-| 3 (tasks 1–3 done) | How a message is published, confirmed, consumed, and acknowledged. Two competing workers come next |
+| 3 (done) | How a message is published, confirmed, consumed, acknowledged, and shared between two competing workers |
 | 4 | How retries, backoff, jitter, and dead-lettering differ |
 | 5 | Why a duplicate message is normal, and how a claim prevents two workers from both running one job |
 | 6 | How to log a job without logging its payload, and how to run the stack in Docker |
@@ -108,7 +108,7 @@ The worker pulls a message, loads the job from SQL Server, does the work, saves 
 | Producer | Implemented | `RabbitMqJobPublisher`, called by `JobSubmissionService` |
 | Publisher confirms | Implemented | `RabbitMqJobPublisher`, ADR-008 |
 | Consumer | Implemented | `RabbitMqJobConsumer`, `WorkerTests` |
-| Competing consumers | Designed | Two workers, one queue. Phase 3 task 4 |
+| Competing consumers | Implemented | `CompetingConsumersTests`, `docs/DEMO.md` |
 | Acknowledgement | Implemented | Ack after the outcome save. ADR-003, ADR-009 |
 | Prefetch | Implemented | `TaskFlow:Worker:PrefetchCount`, default 1 |
 | Redelivery | Implemented, skip rule only | A non-`Queued` row is acked without running. ADR-009 |
@@ -119,7 +119,8 @@ The worker pulls a message, loads the job from SQL Server, does the work, saves 
 | Idempotency | Partial | Terminal redelivery is skipped. Conditional claim is Phase 5 |
 | At-least-once processing | Partial | Manual ack plus the skip rule. ADR-004 |
 | Eventual consistency | Implemented, with documented gaps | Store, publish, then mark `Queued`. `ARCHITECTURE.md` failure windows |
-| Transactions | Designed | `DATABASE.md` |
+| Transactions | Implemented, per `SaveChanges` | Claim and outcome are separate saves. `DATABASE.md` |
+| Snapshot isolation | Implemented | `EnableReadCommittedSnapshot`, ADR-010 |
 | Database concurrency | Designed | Compare-and-update claim |
 | Optimistic concurrency | Designed | Status predicate on update |
 | Strategy / handler pattern | Implemented | `IJobHandler`, `JobHandlerRegistry` |
@@ -892,3 +893,122 @@ Phase 2 saved jobs with `Add`, which marks the whole graph as new, so the key se
 - Handler exceptions are permanent until Phase 4.
 - A crash after the claim strands the job. Phase 5.
 - The next task is two worker processes on one queue.
+
+## Task: Competing consumers
+
+### What we built
+
+Proof that two workers share one queue. `CompetingConsumersTests` starts two worker hosts, `worker-a` and `worker-b`, each with its own RabbitMQ connection. It submits 8 one-second `demo.slow` jobs. Every job ends `Succeeded` with one attempt, and both worker ids appear on those attempts. A second test runs every handler end to end across the two workers.
+
+`docs/DEMO.md` does the same with two real `TaskFlow.Worker` processes, using the new `worker-1` and `worker-2` launch profiles. It was run on this machine and the output is in the doc.
+
+Making the tests reliable exposed two real bugs, which are now fixed:
+
+- A deadlock between the API's read and the worker's write. Migration `EnableReadCommittedSnapshot` fixes it.
+- `dotnet ef database update` ignored `ConnectionStrings__TaskFlow`.
+
+The test fixture was also creating the tables in `master`; it now uses a `TaskFlow` database.
+
+### Why we built it
+
+"Scale out by adding a worker" was a claim in the design. Now a test and a recorded run back it up. The task also had to show what two workers do not prove yet.
+
+### How it works
+
+1. Both workers call `BasicConsumeAsync` on `taskflow.jobs.process` with prefetch 1. RabbitMQ now has two consumers on one queue.
+2. RabbitMQ hands each message to one consumer. It does not copy the message to both.
+3. With prefetch 1, a worker that holds an unacked message is not offered another. While worker-a runs a one-second job, the next message goes to worker-b.
+4. Each worker claims, runs, saves, and acks as before. The `WorkerId` on each attempt records who ran it.
+5. The test waits for the queue to report 2 consumers before it submits anything. `StartAsync` returns before a consumer is registered. Without that wait, one worker could take every job and the test would prove nothing.
+
+### Simple analogy
+
+Two cashiers, one line. The next customer goes to whichever cashier is free. A customer is never served by both. Prefetch 1 means each cashier serves one customer at a time, rather than lining several up at their own till.
+
+### Important concepts learned
+
+- Competing consumers is not fan-out. Fan-out (a copy to every consumer) needs one queue per consumer bound to the exchange. TaskFlow has one shared queue.
+- Prefetch decides how evenly work spreads. With a large prefetch, one worker can grab a pile of messages while the other sits idle.
+- A test can pass and still not prove what it claims. Waiting for the consumer count is what makes this one meaningful.
+- A test that fails some of the time can be pointing at a real bug. This one exposed a SQL Server deadlock that clients would also hit.
+
+### Important code locations
+
+| File | What it does |
+| --- | --- |
+| `tests/TaskFlow.IntegrationTests/CompetingConsumersTests.cs` | Two workers, 8 jobs, both worker ids. End-to-end test of every handler |
+| `tests/TaskFlow.IntegrationTests/TestWorkerHost.cs` | Starts a worker host with `Program.cs`'s registration calls. Waits for the consumer count |
+| `tests/TaskFlow.IntegrationTests/TestJobApi.cs` | Submit and poll helpers |
+| `src/TaskFlow.Worker/Properties/launchSettings.json` | `worker-1` and `worker-2` profiles. They set `WorkerId` only |
+| `src/TaskFlow.Infrastructure/Persistence/Migrations/20261003154256_EnableReadCommittedSnapshot.cs` | Turns on row-versioned reads |
+| `src/TaskFlow.Infrastructure/Persistence/TaskFlowDbContextFactory.cs` | `dotnet ef` now reads `ConnectionStrings__TaskFlow` |
+| `docs/DEMO.md` | The two-process walkthrough and its observed output |
+
+### Database impact
+
+`READ_COMMITTED_SNAPSHOT` is on. A read sees the last committed version of a row instead of waiting on, or deadlocking with, a writer. Row versions are kept in `tempdb`. No tables changed.
+
+### Messaging impact
+
+None in production code. Two connections, two consumers, one queue. The management UI's consumer count lags by a few seconds after a worker stops.
+
+### Failure scenarios
+
+- One worker stops: the other drains the queue. Seen in the demo: three jobs after worker-2 stopped all ran on worker-1.
+- API read during a worker write: before the fix, SQL Server sometimes killed one side with error 1205. The client got 503, or the worker nacked and the job got stuck in `Processing`. After the fix, five consecutive integration runs passed.
+- A redelivery reaching the second worker while the first is mid-job: **not covered**. The claim is not conditional yet. Phase 5.
+- A worker killed mid-job: **not covered**. The job stays `Processing`. Phase 5.
+
+### Why this design?
+
+Two hosts in one test process are fast and deterministic enough for every test run, and RabbitMQ still sees two independent connections. A real two-process run is closer to production but slower and harder to clean up, so it lives in the demo and was run by hand.
+
+Snapshot reads fix the cause of the deadlock. EF's retry-on-failure would only re-run the victim after the deadlock happened.
+
+### Alternatives
+
+- Spawn two `TaskFlow.Worker` processes from the test. Rejected for the suite: slower, and process cleanup on Windows is fragile. Used in the demo instead.
+- Assert the exact alternation `a, b, a, b`. Rejected: RabbitMQ does not promise that order. The test asserts both ids appear and each job has one attempt.
+- Retry deadlocked queries with `EnableRetryOnFailure`. Rejected: it hides the conflict instead of removing it.
+- `NOLOCK` on the GET. Rejected: dirty reads could show a status that was rolled back.
+
+### Tradeoffs
+
+The automated proof is two hosts, not two processes. The demo covers the process boundary, but by hand. Snapshot isolation costs `tempdb` space and makes the migration end other open transactions while it runs.
+
+### Interview questions
+
+1. How does TaskFlow scale out the work?
+2. Why doesn't every worker get every message?
+3. What role does prefetch play?
+4. What does `CompetingConsumersTests` prove, and what doesn't it prove?
+5. What was the flaky test telling you?
+6. Why `READ_COMMITTED_SNAPSHOT` instead of retries?
+
+### Interview answers
+
+1. By running more `TaskFlow.Worker` processes on the same queue. `docs/DEMO.md` ran two, and the jobs alternated between `worker-1` and `worker-2`.
+2. They consume one shared queue, so RabbitMQ delivers each message to one consumer. A copy to every worker would need a queue per worker bound to the exchange.
+3. Prefetch 1 means a worker gets a new message only after it acks the last one. Slow jobs therefore spread to idle workers instead of piling up on one.
+4. It proves that both workers take jobs from one queue, that each job ends with one attempt, and that the queue drains. It does not prove safety when two workers hold the same job at once, or recovery from a crash. Those are Phase 5.
+5. SQL Server error 1205, a deadlock between the API's `GET` (job plus attempts) and a worker updating the job. Clients would have hit it too. The fix was in the database, not the test.
+6. Snapshot reads remove the reader/writer conflict. Retries would run the losing side again after a deadlock that still happened. ADR-010 has the alternatives.
+
+### Deep dive
+
+#### Why the deadlock happened
+
+The `GET` reads `Jobs` and then `JobAttempts` for one job, taking shared locks. The worker's claim updates the `Jobs` row and inserts a `JobAttempts` row in one transaction, taking exclusive locks. When each holds a lock the other needs, SQL Server picks a victim. Under `READ_COMMITTED_SNAPSHOT`, the reader takes no shared locks. It reads the last committed version, so the cycle cannot form. Writers still block other writers. The Phase 5 `UPDATE ... WHERE Status = Queued` claim depends on that.
+
+#### Why the fixture had to move off `master`
+
+`MsSqlBuilder.GetConnectionString()` points at `master`. Until now, the tests created TaskFlow's tables in the system database, which worked by accident. `ALTER DATABASE CURRENT` refuses to change a system database, so the new migration failed. The first run showed 19 of 23 tests failing in 9 seconds. The fixture now sets `InitialCatalog = "TaskFlow"`, and `Migrate` creates that database.
+
+### Things I should remember
+
+- One queue, many consumers: each message goes to one worker.
+- Prefetch 1 spreads slow jobs.
+- Wait for the consumer count before submitting jobs in a concurrency test.
+- A flaky test can be a real bug. This one was a deadlock.
+- Two workers holding the same job at once is still unsafe. Phase 5.
+- The next task is Phase 4: classify failures and schedule retries with backoff.

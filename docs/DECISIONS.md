@@ -96,3 +96,12 @@ These ADRs record choices that are already made. The implementation status says 
   - A crash after the claim leaves a `Processing` row that later deliveries skip, so the job is stuck until Phase 5.
   - Treating every exception as permanent is wrong for transient errors until Phase 4.
 - Consequences: The ack has one site. A job does not run for a delivery whose row says it is already running or finished. Phase 5 replaces the plain claim save with a compare-and-update and adds recovery for stuck `Processing` rows.
+
+## ADR-010: Read committed snapshot isolation
+
+- Status: Accepted. Implementation: done (Phase 3 task 4). Migration `EnableReadCommittedSnapshot`.
+- Context: With a worker writing a job (update `Jobs`, insert `JobAttempts`) while a client polls `GET /api/v1/jobs/{id}` (a join over the same rows), SQL Server sometimes deadlocked the two and killed one with error 1205. The API then returned 503, or the worker nacked and the redelivery found the job `Processing` and skipped it. `CompetingConsumersTests` and `WorkerTests` failed in 2 of 4 runs.
+- Decision: Turn on `READ_COMMITTED_SNAPSHOT` for the database. Readers see the last committed version and take no shared locks. Writes are unchanged.
+- Alternatives: `EnableRetryOnFailure` in EF (retries the victim, but keeps the deadlocks and adds latency, and a retried worker save could hide a real problem). `NOLOCK` hints on reads (dirty reads of a half-written job). Splitting the GET into two queries (narrows the window, does not close it).
+- Tradeoffs: Row versions use `tempdb`. A reader can see a status that is a few milliseconds old, which polling already tolerates. The migration uses `ROLLBACK IMMEDIATE`, so it ends other open transactions on that database while it runs.
+- Consequences: The Phase 5 conditional claim still works, because `UPDATE ... WHERE Status = Queued` takes update locks regardless of snapshot reads. The migration cannot run against `master`.

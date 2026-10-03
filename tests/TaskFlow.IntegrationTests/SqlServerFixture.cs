@@ -1,5 +1,6 @@
 using TaskFlow.Infrastructure.Persistence;
 
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
 using Testcontainers.MsSql;
@@ -16,7 +17,11 @@ public sealed class SqlServerFixture : IAsyncLifetime
     private readonly MsSqlContainer _container = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-latest")
         .Build();
 
-    public string ConnectionString => _container.GetConnectionString();
+    // The container's default connection string points at master. Migrate creates this database instead.
+    public string ConnectionString => new SqlConnectionStringBuilder(_container.GetConnectionString())
+    {
+        InitialCatalog = "TaskFlow"
+    }.ConnectionString;
 
     public async Task InitializeAsync()
     {

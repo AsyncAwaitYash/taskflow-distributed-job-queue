@@ -4,6 +4,18 @@
 
 ### Added
 
+- Two workers can share one queue. `CompetingConsumersTests` and a recorded two-process run in `docs/DEMO.md`.
+- Worker launch profiles `worker-1` and `worker-2`.
+- Migration `EnableReadCommittedSnapshot`.
+
+### Fixed
+
+- A deadlock between `GET /api/v1/jobs/{id}` and a worker updating the same job could return 503 or strand the job in `Processing`. Reads now use row versioning.
+- `dotnet ef database update` ignored `ConnectionStrings__TaskFlow` and always tried Windows authentication.
+- The integration tests created the tables in `master`. They now use a `TaskFlow` database.
+
+### Added (worker)
+
 - `TaskFlow.Worker` consumes `taskflow.jobs.process` with manual ack and prefetch 1. Jobs reach `Succeeded` or `Failed`, with one attempt row per run and the worker id on it.
 - Job handlers: `demo.success`, `demo.permanent-failure`, `demo.slow`, `email.send` (simulated), `report.generate`, `data.process`.
 - `TaskFlow:Worker` settings: `PrefetchCount`, `WorkerId`, `DatabaseRetryDelay`, `ConnectRetryDelay`.

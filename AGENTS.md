@@ -50,4 +50,4 @@ Generated code is not evidence. Build and test results are.
 
 Report what changed, what the user should learn, the build and test result, and the next task.
 
-The next task is competing consumers: run two `TaskFlow.Worker` processes against one queue and prove each job is processed by one of them, with the `WorkerId` recorded on the attempt. Add the end-to-end happy-path test. Do not add the compare-and-update claim (Phase 5), retries (Phase 4), or Docker Compose (Phase 6) in that change.
+Phase 3 is complete. The next task is Phase 4 task 1: classify failures as retryable or permanent, add a configured exponential backoff with jitter policy, and have the worker record `RetryScheduled` with `NextAttemptAt` through `Job.RecordRetryableFailure` (or `DeadLettered` when attempts run out). Add the `demo.transient-failure` handler. Ack the message after that save; do not requeue. Do not build the scheduler that republishes due jobs, the retry endpoint, or the Phase 5 conditional claim in that change.

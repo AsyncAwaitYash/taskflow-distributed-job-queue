@@ -1,6 +1,6 @@
 # Architecture
 
-Status: the layering below is implemented as project references. The runtime path runs end to end for one worker: the API stores, publishes with a confirm, and marks `Queued`; the worker consumes, claims, runs a handler, saves the outcome, and acks. Two workers at once, retries, and conditional claims are **not built**.
+Status: the layering below is implemented as project references. The runtime path runs end to end: the API stores, publishes with a confirm, and marks `Queued`; one or more workers consume, claim, run a handler, save the outcome, and ack. Retries and conditional claims are **not built**.
 
 ## Implemented layout
 
@@ -35,8 +35,10 @@ API (implemented)
 exchange taskflow.jobs  --routing key job.process-->  queue taskflow.jobs.process   (implemented)
   |
   +--> Worker 1 (implemented) --> load job, claim, run IJobHandler, write outcome, ack
-  +--> Worker 2 (planned: a second process, Phase 3 task 4)
+  +--> Worker 2 (implemented: the same TaskFlow.Worker code as a second process, its own WorkerId)
 ```
+
+Competing consumers are proven by `CompetingConsumersTests` (two hosts, two connections) and by a manual run of two processes (`docs/DEMO.md`). Each message goes to one consumer. With prefetch 1, a busy worker is not offered a second message, so slow jobs spread across idle workers.
 
 The worker side:
 
@@ -79,7 +81,7 @@ Workers are competing consumers. RabbitMQ decides which idle worker receives a m
 | Publish | Confirms on, `mandatory: true` | "Queued" means the broker accepted and routed it. | Implemented |
 | Ack | Manual | Ack after the outcome is stored. | Implemented |
 | Prefetch | `TaskFlow:Worker:PrefetchCount`, default 1, range 1–50 | Stops one worker from hoarding jobs. | Implemented |
-| Concurrency | One message at a time per worker process. Scale out by adding a process. | Simple ordering and one ack site. | One process implemented, two planned |
+| Concurrency | One message at a time per worker process. Scale out by adding a process. | Simple ordering and one ack site. | Implemented, two processes tested |
 
 Redelivery: if the worker dies before ack, RabbitMQ delivers the same message again. The consumer loads the job and does nothing if the row is no longer `Queued` (or `Pending`). That is tested for a `Succeeded` job. A worker that dies after the claim leaves the row `Processing`, and the redelivery skips it, so the job is stuck until Phase 5 adds recovery.
 

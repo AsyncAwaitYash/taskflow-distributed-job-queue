@@ -1,10 +1,20 @@
 # Database
 
-Status: **the first migration exists.** `dotnet ef database update` creates `Jobs` and `JobAttempts`. There is still no retry-scheduler query, so the filtered `(Status, NextAttemptAt)` index is not created yet. `CorrelationId` is stored and not indexed, because the list endpoint does not search by it.
+Status: **three migrations exist.** `dotnet ef database update` (with `ConnectionStrings__TaskFlow` set in the environment) applies `InitialJobSchema`, `JobClientGeneratedIds`, and `EnableReadCommittedSnapshot`. There is still no retry-scheduler query, so the filtered `(Status, NextAttemptAt)` index is not created yet. `CorrelationId` is stored and not indexed, because the list endpoint does not search by it.
 
 ## Engine
 
 SQL Server, EF Core code first, migrations in Infrastructure. Dapper is for selected reads (the job list once it is worth a hand-written query), not for writes.
+
+## Isolation (implemented)
+
+Migration `EnableReadCommittedSnapshot` runs `ALTER DATABASE CURRENT SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE` outside a transaction. Reads under the default `READ COMMITTED` level then see the last committed row version instead of taking shared locks.
+
+Why: before this, `GET /api/v1/jobs/{id}` (Jobs joined to JobAttempts) could deadlock with a worker that was updating the job and inserting an attempt. SQL Server picked one side as the victim (error 1205). The API returned 503, or the worker nacked and the redelivery found the job `Processing` and skipped it. Found by `CompetingConsumersTests`; `JobPersistenceTests.Migrations_turn_on_read_committed_snapshot` keeps it on.
+
+Costs: row versions live in `tempdb`, and `ROLLBACK IMMEDIATE` ends other open transactions on the database while the migration runs. Writes still lock rows, so the Phase 5 compare-and-update claim is unaffected.
+
+The migration cannot run against `master` (SQL Server refuses `ALTER DATABASE CURRENT` on a system database). The integration tests use a database named `TaskFlow` inside the container for that reason.
 
 ## Tables (planned)
 
@@ -55,12 +65,12 @@ Only these, because a query needs them:
 
 The initial migration creates `IX_Jobs_CreatedAt`, `IX_Jobs_Type_CreatedAt`, and `IX_Jobs_Status_CreatedAt`, because the list query filters and sorts on those columns. It also creates the unique `(JobId, AttemptNumber)` index. The retry-scheduler index and the `CorrelationId` index are still not created. `Duration` is stored as bigint ticks because SQL Server `time` cannot hold every `TimeSpan`.
 
-## Transactions (planned)
+## Transactions
 
-- Creating the job row is one transaction. Publishing to RabbitMQ is outside it until an outbox exists.
-- The scheduler conditionally moves a due `RetryScheduled` row to `Queued` and then publishes. A second pass that updates zero rows does not publish.
-- The worker claims a `Queued` row by setting `Processing`. Zero rows means another worker won.
-- Recording the attempt and moving to `Succeeded`, `Failed`, `RetryScheduled`, or `DeadLettered` commits in one transaction before the message is acknowledged.
+- Implemented: creating the job row is one transaction. Publishing to RabbitMQ is outside it. The `Queued` update after the confirm is a second transaction.
+- Implemented: the worker's claim (`Processing` plus a new attempt row) is one `SaveChanges`. The outcome (`Succeeded` or `Failed` plus the closed attempt) is another, and it commits before the message is acknowledged.
+- Planned (Phase 5): the claim becomes conditional on `Status = Queued`. Zero rows means another worker won.
+- Planned (Phase 4): the scheduler conditionally moves a due `RetryScheduled` row to `Queued` and then publishes. A second pass that updates zero rows does not publish.
 
 ## Concurrency (planned)
 

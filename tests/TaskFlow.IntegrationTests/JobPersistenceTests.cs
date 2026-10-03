@@ -47,6 +47,18 @@ public sealed class JobPersistenceTests
         Assert.Equal(startedAt.AddSeconds(2), stored.LastCompletedAt);
     }
 
+    [Fact]
+    public async Task Migrations_turn_on_read_committed_snapshot()
+    {
+        await using TaskFlowDbContext db = CreateContext();
+
+        bool enabled = await db.Database
+            .SqlQueryRaw<bool>("SELECT is_read_committed_snapshot_on AS [Value] FROM sys.databases WHERE name = DB_NAME()")
+            .SingleAsync();
+
+        Assert.True(enabled);
+    }
+
     private TaskFlowDbContext CreateContext()
     {
         DbContextOptions<TaskFlowDbContext> options = new DbContextOptionsBuilder<TaskFlowDbContext>()
