@@ -1,6 +1,6 @@
 # Database
 
-Status: **no database, no EF Core model, and no migration exist.** This document is the design Phase 2 will implement. If it drifts from the code, fix this file.
+Status: **no database, no EF Core model, and no migration exist.** The columns below match `Job` and `JobAttempt` in `src/TaskFlow.Domain/Jobs`. Phase 2 will map them. If the code and this file drift, fix this file.
 
 ## Engine
 

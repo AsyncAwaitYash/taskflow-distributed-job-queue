@@ -50,4 +50,4 @@ Generated code is not evidence. Build and test results are.
 
 Report what changed, what the user should learn, the build and test result, and the next task.
 
-The next task after Phase 0 is Phase 1: the `Job` and `JobAttempt` domain model and the legal state transitions, with unit tests. Do not add EF Core or the HTTP API in that task.
+The next task is Phase 2: persist `Job` with EF Core and add `POST /api/v1/jobs`, `GET /api/v1/jobs`, and `GET /api/v1/jobs/{id}`. Do not add RabbitMQ in that task. The job's status still changes only through `Job`.

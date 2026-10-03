@@ -80,6 +80,6 @@ Not required for the first API slice. Add it only when the state machine has an 
 
 ## Status values
 
-`Pending`, `Queued`, `Processing`, `Succeeded`, `RetryScheduled`, `Failed`, `DeadLettered`.
+The domain enum `JobStatus` is `Pending`, `Queued`, `Processing`, `Succeeded`, `RetryScheduled`, `Failed`, `DeadLettered`.
 
-Clients must not send a status. The server moves the job.
+Clients must not send a status. The server moves the job through `Job`. The HTTP API does not exist yet, so these values are not returned by any route except the unrelated `GET /` skeleton probe.

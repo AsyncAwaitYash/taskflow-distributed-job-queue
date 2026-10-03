@@ -15,16 +15,15 @@ Not in this phase: job submission, RabbitMQ, worker processing, retries, idempot
 
 ## Phase 1 — Architecture and domain
 
-Status: **next**. Docs in this folder already describe the target. The code does not.
+Status: **done** (2026-10-03).
 
-- `Job` and `JobAttempt` models
-- Status enum and legal transitions
-- Unit tests for the state machine
-- Reconcile `DATABASE.md`, `API_CONTRACT.md`, and `DECISIONS.md` with the code
-
-Suggested first task: implement the domain types and transition rules only. No EF Core and no HTTP endpoints in that change.
+- `Job` and `JobAttempt` in `src/TaskFlow.Domain/Jobs`
+- `JobTransitions` is the only legal status graph, covered by unit tests
+- No EF Core and no HTTP endpoints in this phase
 
 ## Phase 2 — API and SQL Server
+
+Status: **next**.
 
 - ASP.NET Core job endpoints
 - EF Core, the first migration, SQL Server

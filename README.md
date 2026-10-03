@@ -9,6 +9,7 @@ TaskFlow is a small, production-style **distributed background job queue**. A cl
 | Area | State |
 | --- | --- |
 | Solution skeleton (.NET 10) | Built |
+| `Job` / `JobAttempt` state machine | In memory, unit-tested |
 | `GET /` skeleton probe | Runs |
 | `POST /api/v1/jobs` and the rest of the job API | Not implemented |
 | SQL Server, EF Core, RabbitMQ, Docker Compose | Not implemented |

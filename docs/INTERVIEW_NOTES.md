@@ -6,7 +6,7 @@ Answers below are split into **today** (what the code does) and **target** (the 
 
 ### Today (30–60 seconds)
 
-TaskFlow is a learning project I am building: a background job queue. The API will accept a job, store it in SQL Server, and publish a small message to RabbitMQ. A separate worker will do the work, ack the message only after the result is saved, and retry failures with backoff. Right now the repository is the skeleton. The projects compile, the dependency direction is tested, and `GET /` says job processing is off. I have not built the queue yet. I wrote the design down first so the failure cases (crash before ack, duplicate delivery, publish after the database commit) are explicit before the code hides them.
+TaskFlow is a learning project I am building: a background job queue. The API will accept a job, store it in SQL Server, and publish a small message to RabbitMQ. A separate worker will do the work, ack the message only after the result is saved, and retry failures with backoff. The projects compile, the dependency direction is tested, and `GET /` says job processing is off. The job lifecycle does exist in memory: a `Job` moves through a fixed set of statuses, and an attempt is a separate object. I have not built the queue or the database yet. I wrote the design down first so the failure cases (crash before ack, duplicate delivery, publish after the database commit) are explicit before the code hides them.
 
 ### Target, not earned yet (about 60 seconds)
 
@@ -120,8 +120,8 @@ The API is the front door. It writes the job to SQL Server, which is the system 
 
 ### What do the tests prove?
 
-- Short answer: The layer graph, and that the API starts and tells the truth about being a skeleton.
-- TaskFlow example: `ProjectLayoutTests`, `ApiSkeletonTests`.
+- Short answer: The layer graph, the API skeleton, and the in-memory job state machine. They do not prove a queue.
+- TaskFlow example: `ProjectLayoutTests`, `ApiSkeletonTests`, `JobLifecycleTests`.
 - Follow-up: Where will the race tests live?
 - Deeper answer: Integration tests against real SQL Server and RabbitMQ (Testcontainers), Phase 5. Not against an in-memory fake of RabbitMQ.
 
