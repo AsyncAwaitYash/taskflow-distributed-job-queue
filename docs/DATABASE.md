@@ -1,6 +1,6 @@
 # Database
 
-Status: **no database, no EF Core model, and no migration exist.** The columns below match `Job` and `JobAttempt` in `src/TaskFlow.Domain/Jobs`. Phase 2 will map them. If the code and this file drift, fix this file.
+Status: **the first migration exists.** `dotnet ef database update` creates `Jobs` and `JobAttempts`. There is still no retry-scheduler query, so the filtered `(Status, NextAttemptAt)` index is not created yet. `CorrelationId` is stored and not indexed, because the list endpoint does not search by it.
 
 ## Engine
 
@@ -53,7 +53,7 @@ Only these, because a query needs them:
 | `Jobs (CorrelationId)` | Lookup when the caller passes one |
 | `JobAttempts (JobId, AttemptNumber)` unique | History for one job, and the concurrency constraint |
 
-Do not add indexes "just in case".
+The initial migration creates `IX_Jobs_CreatedAt`, `IX_Jobs_Type_CreatedAt`, and `IX_Jobs_Status_CreatedAt`, because the list query filters and sorts on those columns. It also creates the unique `(JobId, AttemptNumber)` index. The retry-scheduler index and the `CorrelationId` index are still not created. `Duration` is stored as bigint ticks because SQL Server `time` cannot hold every `TimeSpan`.
 
 ## Transactions (planned)
 

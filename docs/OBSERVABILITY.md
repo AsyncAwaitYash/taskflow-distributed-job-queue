@@ -4,7 +4,7 @@ Status: **not implemented**, except the framework's default logs.
 
 ## Today
 
-The API and the worker use the built-in console logger. The skeleton writes one structured information line with the layer names and `JobProcessingEnabled=false`. There is no Serilog, no correlation id middleware, no `/health/live`, no `/health/ready`, and no OpenTelemetry.
+The API and the worker use the built-in console logger. Job create logs `JobId`, `JobType`, `Status`, and `CorrelationId`. EF Core command logs are Warning so parameter values, including payloads, are not emitted at the default level. There is no Serilog, no correlation id middleware, no `/health/live`, no `/health/ready`, and no OpenTelemetry.
 
 `GET /` is a liveness probe for humans during Phase 0. It is not the health contract.
 

@@ -50,4 +50,4 @@ Generated code is not evidence. Build and test results are.
 
 Report what changed, what the user should learn, the build and test result, and the next task.
 
-The next task is Phase 2: persist `Job` with EF Core and add `POST /api/v1/jobs`, `GET /api/v1/jobs`, and `GET /api/v1/jobs/{id}`. Do not add RabbitMQ in that task. The job's status still changes only through `Job`.
+The next task is the RabbitMQ topology and publisher. After a successful publish, move the job from `Pending` to `Queued` through `Job.MarkQueued`. Do not consume messages in that change. If the publish fails, leave the row `Pending` and do not report it as queued.

@@ -4,6 +4,9 @@
 
 ### Added
 
+- SQL Server persistence for `Job` and `JobAttempt`, migration `InitialJobSchema`.
+- `POST /api/v1/jobs`, `GET /api/v1/jobs`, and `GET /api/v1/jobs/{id}`. Created jobs stay `Pending`.
+- Swagger UI and Problem Details. Job routes return 503 when SQL Server is not configured.
 - In-memory `Job` and `JobAttempt` model. Status changes only through `Job`, and illegal pairs throw `InvalidJobTransitionException`.
 - Unit tests for the happy path, retry scheduling, permanent failure, exhausted attempts, manual retry, and rejected transitions.
 - Phase 0 solution skeleton for .NET 10: API, application, domain, infrastructure, worker, unit tests, and integration tests.

@@ -1,41 +1,43 @@
 # Current state
 
-- Current phase: **Phase 1 complete**. Phase 2 has not started.
+- Current phase: **Phase 2 complete**. Phase 3 has not started.
 - Current task: none in progress.
 - Last updated: 2026-10-03
 
 ## Completed
 
-- Phase 0 solution skeleton, docs, and cursor rules
-- `Job`, `JobAttempt`, `JobStatus`, and `JobTransitions` in `src/TaskFlow.Domain/Jobs`
-- Unit tests for the legal graph: success, retry scheduling, permanent failure, exhausted budget, manual retry, and rejected transitions
-- `GET /` still reports that job processing is off. The worker still does not consume a queue
+- Phase 0 solution skeleton and Phase 1 in-memory state machine
+- EF Core mapping and migration `InitialJobSchema` for `Jobs` and `JobAttempts`
+- `POST /api/v1/jobs`, `GET /api/v1/jobs`, `GET /api/v1/jobs/{id}`
+- Swagger at `/swagger` and Problem Details for 400, 404, and 503
+- New jobs stay `Pending`. RabbitMQ is not called
+- Testcontainers SQL Server coverage for create, list, get, and attempt round-trip
 
 ## Pending
 
-- Phase 2: EF Core, SQL Server, and the job HTTP API (next)
-- Phases 3–7: RabbitMQ, retry policy, idempotent claims, observability, Docker, broader tests
+- Phase 3: RabbitMQ topology, publisher, then the consuming worker (next task is the publisher only)
+- Phases 4–7: retry policy, idempotent claims, observability, Docker Compose, broader failure tests
 - Phase 8 outbox and benchmark: not started, and not allowed yet
 
 ## Known issues
 
-- The state machine is in memory only. A process restart drops every job, because nothing persists it.
-- `GET /` is a temporary probe. It is not `/health/live` and not the job API.
-- Assembly marker types remain so the layout test can see project references. They are not the domain model.
-- `RetryManually` does not increase `MaxAttempts`. A job that already used its budget can be queued again, and the next retryable failure dead-letters it immediately. Phase 4 can change that when the retry endpoint exists.
-- The backoff delay is an argument to `RecordRetryableFailure`. No policy calculates it yet.
-- RabbitMQ client version is not locked. On 2026-10-03 the newest stable `RabbitMQ.Client` on NuGet was 7.2.2. Re-check before Phase 3.
-- Docker Compose does not exist. `.env.example` is documentation only.
+- A stored job is not queued. Restarting the API does not publish `Pending` rows.
+- `RetryManually` still does not increase `MaxAttempts`. The HTTP retry route does not exist.
+- The backoff delay is still an argument. No policy calculates it.
+- `GET /` is a status probe, not `/health/live`.
+- Assembly marker types remain for the layout test.
+- RabbitMQ client version is not locked. On 2026-10-03 the newest stable `RabbitMQ.Client` on NuGet was 7.2.2. Re-check before adding the package.
+- Docker Compose does not exist. Integration tests start their own SQL Server container.
 
 ## Recent changes
 
-- Added the job aggregate and the attempt entity.
-- Locked the status graph with unit tests.
-- Pointed the design docs at the types that now exist.
+- Added the job HTTP API and the SQL Server migration.
+- Kept created jobs at `Pending` so the response does not claim a publish happened.
+- Proved the mapping with Testcontainers against SQL Server 2022.
 
 ## Next task
 
-Persist `Job` with EF Core and add `POST /api/v1/jobs`, `GET /api/v1/jobs`, and `GET /api/v1/jobs/{id}`. Do not publish to RabbitMQ in that change. Status changes still go through `Job`.
+Add the RabbitMQ exchange, queue, and publisher. After a successful publish, call `Job.MarkQueued`. If the publish fails, leave the row `Pending` and return an error. Do not consume messages in that change.
 
 ## Build status
 
@@ -45,14 +47,14 @@ Succeeded on 2026-10-03 with SDK `10.0.401`.
 
 ## Test status
 
-`dotnet test TaskFlow.slnx`: 37 passed, 0 failed (35 unit, 2 integration).
+`dotnet test TaskFlow.slnx`: 55 passed, 0 failed (44 unit, 11 integration).
 
-The Phase 0 smoke run is unchanged: `GET /` returns `jobProcessing: false`, and the job routes return 404.
+The SQL Server tests ran in Docker with `mcr.microsoft.com/mssql/server:2022-latest`. Without a connection string, `GET /api/v1/jobs` returns 503.
 
 ## Learning topics introduced
 
-- Job versus attempt
-- A closed set of status transitions, including why `Succeeded` has no exit
-- Retry scheduling versus dead-lettering when the attempt budget is spent
-- Manual retry as a separate entry point from publishing
-- Layering and the repository-as-source-of-truth lesson from Phase 0
+- A row is the system of record, and `Pending` is not `Queued`
+- EF Core mapping of get-only domain properties
+- Problem Details for invalid input and a missing database
+- Testcontainers as a real SQL Server, not an in-memory substitute
+- Job versus attempt, and the state machine, from Phase 1

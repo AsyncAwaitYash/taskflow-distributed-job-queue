@@ -1,6 +1,6 @@
 # API contract
 
-Status: **not implemented.** The only live route is the Phase 0 probe below. Anything in the job contract is the target for Phase 2 and Phase 4.
+Status: **create, list, and get are implemented.** Retry and cancel are not. RabbitMQ is not called. A created job stays `Pending`.
 
 Base path, when it exists: `/api/v1/jobs`.
 
@@ -22,13 +22,13 @@ Returns 200 and a JSON object:
 }
 ```
 
-`GET /api/v1/jobs` and `GET /health/live` return 404. That was checked on 2026-10-03.
+`GET /health/live` still returns 404. `GET /api/v1/jobs` returns 503 when `ConnectionStrings:TaskFlow` is missing, and the job list when SQL Server is configured.
 
 ## Planned
 
 ### `POST /api/v1/jobs`
 
-Creates a job, stores it, and publishes a message. The response is the id and the initial status. It does not mean the handler has finished.
+Creates a job and stores it. The response is the id and the persisted status. It does not mean the handler has finished. Phase 2 does not publish, so the status is `Pending`, not `Queued`.
 
 ```json
 {
