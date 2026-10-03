@@ -50,4 +50,4 @@ Generated code is not evidence. Build and test results are.
 
 Report what changed, what the user should learn, the build and test result, and the next task.
 
-The next task is the RabbitMQ topology and publisher. After a successful publish, move the job from `Pending` to `Queued` through `Job.MarkQueued`. Do not consume messages in that change. If the publish fails, leave the row `Pending` and do not report it as queued.
+The next task is competing consumers: run two `TaskFlow.Worker` processes against one queue and prove each job is processed by one of them, with the `WorkerId` recorded on the attempt. Add the end-to-end happy-path test. Do not add the compare-and-update claim (Phase 5), retries (Phase 4), or Docker Compose (Phase 6) in that change.

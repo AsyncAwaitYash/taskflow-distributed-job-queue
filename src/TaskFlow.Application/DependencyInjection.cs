@@ -1,4 +1,5 @@
 using TaskFlow.Application.Jobs;
+using TaskFlow.Application.Jobs.Handlers;
 
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -20,6 +21,14 @@ public static class DependencyInjection
                     && options.MaxAllowedAttempts <= 100,
                 "TaskFlow attempt settings are invalid.")
             .ValidateOnStart();
+
+        services.AddSingleton<IJobHandler, DemoSuccessHandler>();
+        services.AddSingleton<IJobHandler, DemoPermanentFailureHandler>();
+        services.AddSingleton<IJobHandler, DemoSlowHandler>();
+        services.AddSingleton<IJobHandler, EmailSendHandler>();
+        services.AddSingleton<IJobHandler, ReportGenerateHandler>();
+        services.AddSingleton<IJobHandler, DataProcessHandler>();
+        services.AddSingleton<JobHandlerRegistry>();
 
         return services;
     }

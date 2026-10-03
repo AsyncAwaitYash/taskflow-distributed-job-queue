@@ -18,6 +18,11 @@ internal sealed class JobAttemptConfiguration : IEntityTypeConfiguration<JobAtte
 
         builder.HasKey(attempt => attempt.Id);
 
+        // Job.StartProcessing creates the id. If EF thought the store generated it, a new attempt
+        // on an already tracked job would be treated as an existing row and updated instead of inserted.
+        builder.Property(attempt => attempt.Id)
+            .ValueGeneratedNever();
+
         builder.Property(attempt => attempt.AttemptNumber)
             .IsRequired();
 

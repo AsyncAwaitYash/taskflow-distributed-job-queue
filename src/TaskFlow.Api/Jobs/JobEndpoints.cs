@@ -2,6 +2,7 @@ using System.Text.Json;
 
 using TaskFlow.Application.Jobs;
 using TaskFlow.Domain.Jobs;
+using TaskFlow.Infrastructure;
 
 using Microsoft.AspNetCore.Mvc;
 
@@ -38,14 +39,21 @@ public static class JobEndpoints
     private static async Task<IResult> Submit(
         CreateJobRequest request,
         IServiceProvider services,
+        TaskFlowInfrastructureStatus infrastructure,
         ILoggerFactory loggerFactory,
         CancellationToken cancellationToken)
     {
-        JobSubmissionService? submission = services.GetService<JobSubmissionService>();
-        if (submission is null)
+        if (!infrastructure.DatabaseConfigured)
         {
             return DatabaseNotConfigured();
         }
+
+        if (!infrastructure.MessagingConfigured)
+        {
+            return MessagingNotConfigured();
+        }
+
+        JobSubmissionService submission = services.GetRequiredService<JobSubmissionService>();
 
         try
         {
@@ -58,7 +66,7 @@ public static class JobEndpoints
                 cancellationToken);
 
             loggerFactory.CreateLogger("TaskFlow.Api.Jobs").LogInformation(
-                "Stored job. JobId={JobId} Type={JobType} Status={Status} CorrelationId={CorrelationId}",
+                "Queued job. JobId={JobId} Type={JobType} Status={Status} CorrelationId={CorrelationId}",
                 job.Id,
                 job.Type,
                 job.Status,
@@ -69,6 +77,28 @@ public static class JobEndpoints
         catch (InvalidJobRequestException exception)
         {
             return Results.ValidationProblem(exception.Errors);
+        }
+        catch (JobNotQueuedException exception)
+        {
+            loggerFactory.CreateLogger("TaskFlow.Api.Jobs").LogWarning(
+                "Stored job was not queued. JobId={JobId} Status={Status} ExceptionType={ExceptionType}",
+                exception.JobId,
+                JobStatus.Pending,
+                exception.InnerException?.InnerException?.GetType().Name ?? exception.InnerException?.GetType().Name);
+            return BrokerUnavailable(exception.JobId);
+        }
+        catch (JobQueuedStateNotSavedException exception)
+        {
+            LogDatabaseFailure(loggerFactory, exception);
+            return Results.Problem(
+                title: "SQL Server is unavailable.",
+                detail: "The message was published, but the Queued status was not saved. The row still says Pending.",
+                statusCode: StatusCodes.Status503ServiceUnavailable,
+                extensions: new Dictionary<string, object?>
+                {
+                    ["jobId"] = exception.JobId,
+                    ["jobStatus"] = nameof(JobStatus.Pending)
+                });
         }
         catch (JobDatabaseUnavailableException exception)
         {
@@ -152,8 +182,29 @@ public static class JobEndpoints
     {
         return Results.Problem(
             title: "SQL Server is not configured.",
-            detail: "Set ConnectionStrings:TaskFlow. Job routes need a database. RabbitMQ is not used yet.",
+            detail: "Set ConnectionStrings:TaskFlow. Job routes need a database.",
             statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    private static IResult MessagingNotConfigured()
+    {
+        return Results.Problem(
+            title: "RabbitMQ is not configured.",
+            detail: "Set ConnectionStrings:RabbitMq. The job was not stored.",
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    private static IResult BrokerUnavailable(Guid jobId)
+    {
+        return Results.Problem(
+            title: "RabbitMQ is unavailable.",
+            detail: "The job was stored but not queued. It stays Pending and nothing republishes it yet.",
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            extensions: new Dictionary<string, object?>
+            {
+                ["jobId"] = jobId,
+                ["jobStatus"] = nameof(JobStatus.Pending)
+            });
     }
 
     private static IResult DatabaseUnavailable()

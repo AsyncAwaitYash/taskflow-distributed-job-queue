@@ -70,6 +70,11 @@ internal sealed class JobRepository : IJobRepository
         });
     }
 
+    public Task SaveChangesAsync(CancellationToken cancellationToken)
+    {
+        return ExecuteAsync(() => _db.SaveChangesAsync(cancellationToken));
+    }
+
     private static async Task ExecuteAsync(Func<Task> action)
     {
         try

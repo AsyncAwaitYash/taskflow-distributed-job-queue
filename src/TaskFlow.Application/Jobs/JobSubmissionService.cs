@@ -1,5 +1,6 @@
 using System.Text.Json;
 
+using TaskFlow.Application.Jobs.Handlers;
 using TaskFlow.Domain.Jobs;
 
 using Microsoft.Extensions.Options;
@@ -9,15 +10,21 @@ namespace TaskFlow.Application.Jobs;
 public sealed class JobSubmissionService
 {
     private readonly IJobRepository _repository;
+    private readonly IJobPublisher _publisher;
+    private readonly JobHandlerRegistry _handlers;
     private readonly TimeProvider _clock;
     private readonly JobSubmissionOptions _options;
 
     public JobSubmissionService(
         IJobRepository repository,
+        IJobPublisher publisher,
+        JobHandlerRegistry handlers,
         TimeProvider clock,
         IOptions<JobSubmissionOptions> options)
     {
         _repository = repository;
+        _publisher = publisher;
+        _handlers = handlers;
         _clock = clock;
         _options = options.Value;
     }
@@ -35,7 +42,7 @@ public sealed class JobSubmissionService
         {
             errors["type"] = [$"Type must be at most {JobLimits.MaxTypeLength} characters."];
         }
-        else if (!KnownJobTypes.All.Contains(type))
+        else if (!_handlers.IsRegistered(type))
         {
             errors["type"] = ["Type is not a registered job type."];
         }
@@ -76,6 +83,26 @@ public sealed class JobSubmissionService
 
         Job job = Job.Create(type, payload!, maxAttempts, _clock.GetUtcNow(), command.CorrelationId);
         await _repository.AddAsync(job, cancellationToken);
+
+        try
+        {
+            await _publisher.PublishAsync(new JobMessage(job.Id, job.Type, job.CorrelationId), cancellationToken);
+        }
+        catch (JobPublishFailedException exception)
+        {
+            throw new JobNotQueuedException(job.Id, exception);
+        }
+
+        job.MarkQueued(_clock.GetUtcNow());
+        try
+        {
+            await _repository.SaveChangesAsync(cancellationToken);
+        }
+        catch (JobDatabaseUnavailableException exception)
+        {
+            throw new JobQueuedStateNotSavedException(job.Id, exception);
+        }
+
         return job;
     }
 

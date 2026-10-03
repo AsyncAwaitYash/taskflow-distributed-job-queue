@@ -22,12 +22,17 @@ public sealed class SqlServerFixture : IAsyncLifetime
     {
         await _container.StartAsync();
 
+        await using TaskFlowDbContext db = CreateContext();
+        await db.Database.MigrateAsync();
+    }
+
+    public TaskFlowDbContext CreateContext()
+    {
         DbContextOptions<TaskFlowDbContext> options = new DbContextOptionsBuilder<TaskFlowDbContext>()
             .UseSqlServer(ConnectionString)
             .Options;
 
-        await using TaskFlowDbContext db = new(options);
-        await db.Database.MigrateAsync();
+        return new TaskFlowDbContext(options);
     }
 
     public async Task DisposeAsync()
@@ -36,8 +41,9 @@ public sealed class SqlServerFixture : IAsyncLifetime
     }
 }
 
-[CollectionDefinition(SqlServerCollection.Name)]
-public sealed class SqlServerCollection : ICollectionFixture<SqlServerFixture>
+[CollectionDefinition(Name)]
+public sealed class InfrastructureCollection
+    : ICollectionFixture<SqlServerFixture>, ICollectionFixture<RabbitMqFixture>
 {
-    public const string Name = "sqlserver";
+    public const string Name = "infrastructure";
 }

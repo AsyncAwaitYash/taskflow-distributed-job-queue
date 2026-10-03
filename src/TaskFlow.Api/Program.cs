@@ -11,11 +11,11 @@ builder.Services.AddSwaggerGen(options =>
     {
         Title = "TaskFlow",
         Version = "v1",
-        Description = "Stores background jobs in SQL Server. New jobs stay Pending because RabbitMQ is not connected yet."
+        Description = "Stores background jobs in SQL Server and publishes them to RabbitMQ. A job is Queued only after the broker confirms. A separate worker process runs it."
     });
 });
 builder.Services.AddTaskFlowApplication(builder.Configuration);
-bool databaseConfigured = builder.Services.AddTaskFlowInfrastructure(builder.Configuration);
+TaskFlowInfrastructureStatus infrastructure = builder.Services.AddTaskFlowInfrastructure(builder.Configuration, "taskflow-api");
 
 WebApplication app = builder.Build();
 
@@ -28,20 +28,25 @@ app.UseSwaggerUI(options =>
 });
 
 app.Logger.LogInformation(
-    "TaskFlow API. DatabaseConfigured={DatabaseConfigured} JobProcessingEnabled={JobProcessingEnabled}",
-    databaseConfigured,
+    "TaskFlow API. DatabaseConfigured={DatabaseConfigured} MessagingConfigured={MessagingConfigured} JobProcessingEnabled={JobProcessingEnabled}",
+    infrastructure.DatabaseConfigured,
+    infrastructure.MessagingConfigured,
     false);
 
 app.MapGet("/", () => Results.Ok(new
 {
     name = "TaskFlow",
     status = "running",
-    phase = 2,
+    phase = 3,
     jobProcessing = false,
-    databaseConfigured,
-    message = databaseConfigured
-        ? "Jobs are stored in SQL Server and stay Pending. RabbitMQ and job handlers are not implemented."
-        : "SQL Server is not configured, so job routes return 503. RabbitMQ and job handlers are not implemented."
+    databaseConfigured = infrastructure.DatabaseConfigured,
+    messagingConfigured = infrastructure.MessagingConfigured,
+    message = (infrastructure.DatabaseConfigured, infrastructure.MessagingConfigured) switch
+    {
+        (true, true) => "Jobs are stored in SQL Server and published to RabbitMQ. A separate TaskFlow.Worker process runs them.",
+        (true, false) => "RabbitMQ is not configured, so job submission returns 503. List and get work.",
+        _ => "SQL Server is not configured, so job routes return 503."
+    }
 }));
 
 app.MapJobEndpoints();

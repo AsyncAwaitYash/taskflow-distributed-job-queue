@@ -4,7 +4,7 @@ This is the textbook for the repository. If a sentence describes behavior, the c
 
 ## What is TaskFlow?
 
-**Status: jobs can be stored in SQL Server. The queue and the worker are not connected, so a new job stays Pending.**
+**Status: jobs are stored in SQL Server, published to RabbitMQ, and run by one worker process that acks after saving the outcome. Retries and a second worker are not built.**
 
 TaskFlow will be a small background-job system. A client will ask an API to do something that should not block the HTTP call, such as "send this email" or "generate this report". The API will remember the job. A worker process, running separately, will do it later.
 
@@ -15,7 +15,7 @@ You are building it to learn two ideas well enough to explain in an interview:
 
 It is not a SaaS product. Swagger will be the UI. There is no React app.
 
-Today `POST /api/v1/jobs` inserts a row when SQL Server is configured. The status is `Pending` because nothing publishes to RabbitMQ. The worker still waits and does not consume. You can also walk a `Job` through later statuses in a unit test; the API does not do that yet.
+Today `POST /api/v1/jobs` inserts a `Pending` row, publishes the job id to RabbitMQ, waits for the broker to confirm, and then marks the row `Queued`. `TaskFlow.Worker` takes the message from `taskflow.jobs.process`, loads the row, runs the handler for the job type, saves `Succeeded` or `Failed`, and acks. The retry statuses (`RetryScheduled`, `DeadLettered`) are reached only in unit tests until Phase 4.
 
 ## The picture we are building (planned)
 
@@ -60,21 +60,22 @@ Asynchronous, here, means the API records the job and returns. The work happens 
 
 That split is the point of a background job. It is also why "the API returned 201" and "the job succeeded" are different events. The first one will exist in Phase 2. The second one will exist in Phase 3.
 
-## What RabbitMQ will eventually do (planned)
+## What RabbitMQ does here
 
-RabbitMQ will be the transport, not the database.
+RabbitMQ is the transport, not the database.
 
-Planned topology:
+Implemented (see `src/TaskFlow.Infrastructure/Messaging`):
 
 - Exchange `taskflow.jobs` (durable, direct)
 - Queue `taskflow.jobs.process` (durable)
 - Routing key `job.process`
-- Message body: job id and small metadata, not the full payload
-- Manual acknowledgement
+- Message body: `{ jobId, type, correlationId }`, not the payload
+- Publisher confirms and `mandatory: true`
+- Manual acknowledgement by the worker, prefetch 1
 
-The worker will pull a message, load the job from SQL Server, do the work, save the outcome, and only then acknowledge. If the worker dies first, RabbitMQ delivers the message again. That second delivery is redelivery, not a new job.
+The worker pulls a message, loads the job from SQL Server, does the work, saves the outcome, and only then acknowledges. If the worker dies first, RabbitMQ delivers the message again. That second delivery is redelivery, not a new job.
 
-The .NET client is not referenced yet. On 2026-10-03 the newest stable `RabbitMQ.Client` on NuGet was 7.2.2. Phase 3 re-checks [the official .NET client guide](https://www.rabbitmq.com/docs/dotnet) before locking the version.
+`RabbitMQ.Client` 7.2.2 is pinned. It was still the newest stable release on NuGet on 2026-10-03.
 
 ## What you will learn
 
@@ -83,7 +84,7 @@ The .NET client is not referenced yet. On 2026-10-03 the newest stable `RabbitMQ
 | 0 (done) | How the solution is cut into layers, and why the docs are part of the project |
 | 1 (done) | What a job is, what an attempt is, and which status changes are legal |
 | 2 (done) | How an HTTP request becomes a row |
-| 3 | How a message is published, consumed, and acknowledged |
+| 3 (tasks 1–3 done) | How a message is published, confirmed, consumed, and acknowledged. Two competing workers come next |
 | 4 | How retries, backoff, jitter, and dead-lettering differ |
 | 5 | Why a duplicate message is normal, and how a claim prevents two workers from both running one job |
 | 6 | How to log a job without logging its payload, and how to run the stack in Docker |
@@ -100,26 +101,28 @@ The .NET client is not referenced yet. On 2026-10-03 the newest stable `RabbitMQ
 | Dependency injection | Implemented, narrowly | `TaskFlow.Worker/Program.cs` registers `Worker` |
 | Structured log placeholders | Implemented, narrowly | The skeleton log lines. Serilog is not installed |
 | Asynchronous processing | Designed | This guide, ADR-001 |
-| Background jobs | Stored, not queued | `POST /api/v1/jobs` inserts `Pending`. No broker yet |
+| Background jobs | Implemented | API stores and publishes. `TaskFlow.Worker` runs the handler |
 | Job state machine | Implemented | `JobTransitions`, `JobLifecycleTests` |
-| Message queues | Designed | ADR-002 |
-| RabbitMQ | Designed | ADR-002, `ARCHITECTURE.md` |
-| Producer | Designed | The API, later |
-| Consumer | Designed | The worker, later. Today's worker consumes nothing |
-| Competing consumers | Designed | Two workers, one queue |
-| Acknowledgement | Designed | ADR-003 |
-| Redelivery | Designed | ADR-003, ADR-004 |
+| Message queues | Implemented, publish side | `RabbitMqTopology`, ADR-002 |
+| RabbitMQ | Implemented, publish side | `src/TaskFlow.Infrastructure/Messaging`, `JobPublishingTests` |
+| Producer | Implemented | `RabbitMqJobPublisher`, called by `JobSubmissionService` |
+| Publisher confirms | Implemented | `RabbitMqJobPublisher`, ADR-008 |
+| Consumer | Implemented | `RabbitMqJobConsumer`, `WorkerTests` |
+| Competing consumers | Designed | Two workers, one queue. Phase 3 task 4 |
+| Acknowledgement | Implemented | Ack after the outcome save. ADR-003, ADR-009 |
+| Prefetch | Implemented | `TaskFlow:Worker:PrefetchCount`, default 1 |
+| Redelivery | Implemented, skip rule only | A non-`Queued` row is acked without running. ADR-009 |
 | Retries | Designed | ADR-005 |
 | Exponential backoff | Designed | ADR-005 |
 | Jitter | Designed | ADR-005 |
 | Dead lettering | Designed | Status `DeadLettered`, not a second RabbitMQ queue in v1 |
-| Idempotency | Designed | ADR-004 |
-| At-least-once processing | Designed | ADR-004 |
-| Eventual consistency | Designed | The gap between SQL commit and publish |
+| Idempotency | Partial | Terminal redelivery is skipped. Conditional claim is Phase 5 |
+| At-least-once processing | Partial | Manual ack plus the skip rule. ADR-004 |
+| Eventual consistency | Implemented, with documented gaps | Store, publish, then mark `Queued`. `ARCHITECTURE.md` failure windows |
 | Transactions | Designed | `DATABASE.md` |
 | Database concurrency | Designed | Compare-and-update claim |
 | Optimistic concurrency | Designed | Status predicate on update |
-| Strategy / handler pattern | Designed | `IJobHandler`, Phase 3 |
+| Strategy / handler pattern | Implemented | `IJobHandler`, `JobHandlerRegistry` |
 | Correlation IDs | Designed | Column plus logs, Phase 6 |
 | Health checks | Designed | `/health/live`, `/health/ready`, Phase 6 |
 | Docker | Designed | `docker/README.md`, Phase 6 |
@@ -168,11 +171,11 @@ The response is the front door. `Succeeded` is the worker's later write. Poll `G
 
 ### Database state vs queue state
 
-A job can be `Queued` in SQL Server while the publish is still in flight, or `Queued` in SQL Server with no message at all if the publish failed. Those are different bugs. The outbox is the later fix for the second one. It is not built.
+TaskFlow marks `Queued` only after the broker confirms, so the two stores disagree in the other direction. A failed publish leaves a `Pending` row with no message. A failed second save leaves a message for a `Pending` row. Those are different problems. The outbox is the later fix for the first one. It is not built.
 
 ## Failure scenarios I understand
 
-None of these can be executed. The "how TaskFlow behaves" line is the planned behavior. Do not answer an interview with these as if you have shipped them.
+Scenarios 8 and 10 are implemented on the publish side (`JobPublishingTests`). Scenarios 2, 3, and 6 are implemented in the worker (`WorkerTests`, `JobProcessorTests`). Scenario 1 is implemented by manual ack, but a real crash is not tested yet. The rest are planned. Do not answer an interview with a planned scenario as if you have shipped it.
 
 ### 1. Worker crashes before ack
 
@@ -184,13 +187,13 @@ None of these can be executed. The "how TaskFlow behaves" line is the planned be
 
 ### 2. RabbitMQ redelivers an unacknowledged message
 
-- Planned behavior: the consumer loads the job by id and decides from the row, not from memory.
+- Implemented behavior: `JobProcessor` loads the job by id and decides from the row, not from the message. Only a `Queued` (or `Pending`) row runs.
 - Tradeoff: every consumer must handle a message it has never seen and a message it might have seen.
 - Interview question: What do you store in the message if the row is the source of truth?
 
 ### 3. Job succeeds but the worker crashes before ack
 
-- Planned behavior: the row is `Succeeded`. The next worker sees a terminal status, acks, and does not run the handler.
+- Implemented behavior: the row is `Succeeded`. The next delivery sees a terminal status, acks, and does not run the handler. `A_duplicate_message_for_a_succeeded_job_is_acked_without_a_second_attempt` simulates this by republishing the message.
 - Tradeoff: this is safe only if the success was committed before the crash.
 - Interview question: Which write has to happen before ack?
 
@@ -208,7 +211,7 @@ None of these can be executed. The "how TaskFlow behaves" line is the planned be
 
 ### 6. Permanent failure should not retry forever
 
-- Planned behavior: status `Failed`, attempt row records a permanent outcome, message acked.
+- Implemented behavior: status `Failed`, attempt row records `PermanentFailure` and the error type, message acked. `A_permanent_failure_is_saved_as_failed`.
 - Tradeoff: a bug in classification can drop a job that should have been retried. Classification has to be tested.
 - Interview question: Give an example of each class in this project.
 
@@ -220,19 +223,19 @@ None of these can be executed. The "how TaskFlow behaves" line is the planned be
 
 ### 8. RabbitMQ is unavailable
 
-- Planned behavior: the API cannot publish. The request fails. If the row was already committed, the gap from ADR-007 is visible.
+- Implemented behavior: the row is already committed as `Pending`. The publish fails or times out, the API returns 503 with `jobId` and `jobStatus: "Pending"`, and the row stays `Pending`. `Unreachable_broker_returns_503_and_leaves_the_stored_job_pending` proves it. If RabbitMQ is not configured at all, the API returns 503 and stores nothing.
 - Tradeoff: the client can retry the HTTP call. The submit path has to be careful not to create two jobs for one user action. Idempotency keys are not in v1; `correlationId` is for tracing, not deduplication, unless a later task says otherwise.
 - Interview question: What does the client see?
 
 ### 9. SQL Server is unavailable
 
-- Planned behavior: submit fails and nothing is published. A worker that cannot load or claim the job does not ack, so the message returns, unless the error is clearly permanent.
+- Behavior: submit fails and nothing is published (implemented). A worker that cannot load or claim the job waits `DatabaseRetryDelay` and nacks with requeue, so the message returns (implemented in `RabbitMqJobConsumer`, not covered by a test that stops SQL Server).
 - Tradeoff: not acking when the database is down is correct and can also pile up unacked messages. Prefetch stays small for that reason.
 - Interview question: Why is "nack and requeue immediately" still a bad default while SQL is down?
 
 ### 10. API stores state but publish fails
 
-- Planned behavior: the row remains, the response is an error, and the docs admit the job will not run until something republishes it.
+- Implemented behavior: the row remains `Pending`, the response is 503 with the `jobId`, and nothing republishes it yet. That is the open gap.
 - Tradeoff: honesty instead of a fake "queued" status.
 - Interview question: What would an outbox change, and what would it leave the same?
 
@@ -621,3 +624,271 @@ The attempt list is the field `_attempts`. The configuration points the `Attempt
 - The payload is in the row and not in the log.
 - Docker is required for the SQL Server tests, not for the unit tests.
 - The next task is a real RabbitMQ publish, and only then `MarkQueued`.
+
+## Task: RabbitMQ topology and publisher
+
+### What we built
+
+`POST /api/v1/jobs` now hands the job to RabbitMQ. The API stores the row as `Pending`, publishes a small message, waits for the broker to confirm it, and only then marks the row `Queued`. The API declares the exchange `taskflow.jobs`, the queue `taskflow.jobs.process`, and the binding `job.process` the first time it connects.
+
+Nothing consumes the queue. Messages wait there until the worker task lands.
+
+### Why we built it
+
+Phase 2 stopped at `Pending` because `Queued` would have been a lie without a broker. This task makes `Queued` true: the status now means "RabbitMQ accepted and routed a message for this job id".
+
+### How it works
+
+1. `JobEndpoints.Submit` checks `TaskFlowInfrastructureStatus`. No SQL Server or no RabbitMQ setting means 503, and nothing is stored.
+2. `JobSubmissionService.SubmitAsync` validates and calls `IJobRepository.AddAsync`. The row commits as `Pending`.
+3. It calls `IJobPublisher.PublishAsync(new JobMessage(job.Id, job.Type, job.CorrelationId))`.
+4. `RabbitMqJobPublisher` gets the shared connection from `RabbitMqConnectionProvider`. The first call opens the connection and runs `RabbitMqTopology.DeclareAsync`.
+5. The publisher opens a channel with publisher confirmations and tracking on, and calls `BasicPublishAsync` with `mandatory: true`, `Persistent = true`, `MessageId` = job id, and the correlation id. With tracking on, that call does not finish until the broker acks. It throws if the broker nacks or returns the message as unroutable.
+6. After the confirm, the service calls `job.MarkQueued(now)` and `IJobRepository.SaveChangesAsync`.
+7. The API returns 201 with `status: "Queued"`.
+
+If step 5 fails or takes longer than `TaskFlow:RabbitMq:PublishTimeout` (5 seconds), the publisher throws `JobPublishFailedException`. The service wraps it in `JobNotQueuedException(jobId)` and does not touch the status. The API returns 503 with `jobId` and `jobStatus: "Pending"`.
+
+If step 6 fails, the service throws `JobQueuedStateNotSavedException(jobId)`. The API returns 503 with the same two fields and a detail that says the message was published.
+
+### Simple analogy
+
+The restaurant now writes the order in the book (SQL Server), then clips a slip with the ticket number onto the kitchen rail (RabbitMQ). The host waits for the rail to click shut (the confirm) before telling you "your order is in". If the rail is jammed, the host says "it's written down, but it's not on the rail", and gives you the ticket number. The kitchen staff (the worker) has not been hired yet, so the slips just hang there.
+
+### Important concepts learned
+
+- `BasicPublishAsync` returning is not the same as the broker having the message. Publisher confirms make the broker say "I have it".
+- `mandatory: true` turns "no queue was bound to this routing key" into an error. Without it, RabbitMQ silently drops an unroutable message.
+- A durable queue plus a persistent message is what survives a broker restart. Either one alone is not enough.
+- Storing first and publishing second means the possible mismatch is "row without message", which the row can explain. Publishing first would allow "message without row", which a worker cannot explain.
+- The Application project still has no RabbitMQ types. It knows `IJobPublisher` and `JobMessage`.
+
+### Important code locations
+
+| File | What it does |
+| --- | --- |
+| `src/TaskFlow.Application/Jobs/JobSubmissionService.cs` | Store, publish, mark `Queued`, save. Maps the two failure windows to two exceptions. |
+| `src/TaskFlow.Application/Jobs/IJobPublisher.cs` | The port. Returns only after a confirm. |
+| `src/TaskFlow.Application/Jobs/JobMessage.cs` | The message body. No payload. |
+| `src/TaskFlow.Application/Jobs/JobNotQueuedException.cs` | Stored, not published. Carries the job id. |
+| `src/TaskFlow.Application/Jobs/JobQueuedStateNotSavedException.cs` | Published, `Queued` not saved. Carries the job id. |
+| `src/TaskFlow.Infrastructure/Messaging/RabbitMqTopology.cs` | Names and the idempotent declare. |
+| `src/TaskFlow.Infrastructure/Messaging/RabbitMqConnectionProvider.cs` | One lazy connection with automatic recovery. Declares the topology before it hands the connection out. |
+| `src/TaskFlow.Infrastructure/Messaging/RabbitMqJobPublisher.cs` | Confirmed, mandatory, persistent publish. Maps client errors and timeouts to `JobPublishFailedException`. |
+| `src/TaskFlow.Infrastructure/DependencyInjection.cs` | Registers messaging only when `ConnectionStrings:RabbitMq` is a valid `amqp://` URI. Returns `TaskFlowInfrastructureStatus`. |
+| `src/TaskFlow.Api/Jobs/JobEndpoints.cs` | The 503 shapes with `jobId` and `jobStatus`. |
+| `tests/TaskFlow.UnitTests/Jobs/JobSubmissionServiceTests.cs` | Order of operations and the failure branches, with a recording publisher. |
+| `tests/TaskFlow.IntegrationTests/JobPublishingTests.cs` | Real RabbitMQ: message shape, topology, unreachable broker, missing setting. |
+| `tests/TaskFlow.IntegrationTests/RabbitMqFixture.cs` | The `rabbitmq:4.1` container. |
+
+### Database impact
+
+No migration. Creating a job is now two `SaveChanges` calls: the insert, and the `Queued` update after the confirm. They are separate transactions on purpose, because the publish sits between them.
+
+### Messaging impact
+
+The API is a producer. It declares the topology, so a fresh broker works without manual setup. The message is about 100 bytes of JSON. The worker still consumes nothing, so the queue only grows.
+
+### Failure scenarios
+
+- RabbitMQ not configured: 503 `RabbitMQ is not configured.`, no row. Test: `Missing_rabbitmq_setting_returns_503_without_storing_a_job`.
+- RabbitMQ unreachable or slow: 503 `RabbitMQ is unavailable.` with `jobId`. The row stays `Pending`. Test: `Unreachable_broker_returns_503_and_leaves_the_stored_job_pending`.
+- The broker nacks, or returns the message as unroutable: the same 503. This is handled in `RabbitMqJobPublisher` but no test forces it.
+- SQL Server fails after the confirm: 503 `SQL Server is unavailable.` with `jobId`. The message is in the queue and the row says `Pending`. Unit test only: `Submit_reports_a_published_job_whose_queued_status_was_not_saved`.
+- The confirm is lost when the connection drops after the broker accepted the message: reported as a failure, but a message may exist. A later consumer may see it.
+- The process dies between any two steps: no response, and one of the two windows above is left behind.
+
+### Why this design?
+
+Confirms are the only way the API can honestly say `Queued`. Without them the status would mean "we tried".
+
+The connection is lazy so the API can start, list, and get jobs while RabbitMQ is down. A missing setting is rejected up front, because a job stored with no way to publish it would never move.
+
+A channel per publish keeps the code simple. An `IChannel` should not be shared by concurrent publishers, and a pool is more code than this task needs.
+
+### Alternatives
+
+- Publish before the insert. Rejected: a worker could receive an id that has no row.
+- Fire-and-forget publish. Rejected: `Queued` would include messages the broker never accepted.
+- Retry the publish inside the request. Rejected for now: it hides the failure and makes the request slow. A republisher or an outbox is the honest fix.
+- Return 201 `Pending` when RabbitMQ is not configured. Rejected: that job would never be published by anything.
+- Put the status in a Problem Details `status` extension. Rejected: `status` is already the HTTP code in RFC 9457, so the field is `jobStatus`.
+
+### Tradeoffs
+
+Every submit now costs a SQL insert, a broker round-trip for the confirm, a channel open, and a SQL update. That is slower than Phase 2 and much easier to explain. A failed publish leaves an orphan `Pending` row that nothing picks up yet. The client gets the id, but retrying the HTTP call creates a second job.
+
+### Interview questions
+
+1. When does a TaskFlow job become `Queued`, exactly?
+2. What do publisher confirms give you that `BasicPublish` alone does not?
+3. Why `mandatory: true`?
+4. Why insert first and publish second?
+5. What does the client see if RabbitMQ is down?
+6. What is left behind if SQL Server fails right after the confirm?
+7. Why is the payload not in the message?
+
+### Interview answers
+
+1. After the broker confirms the publish and the second `SaveChanges` commits. `JobSubmissionService` calls `MarkQueued` only after `PublishAsync` returns, and `JobSubmissionServiceTests` checks that a failed publish leaves `Pending`.
+2. A confirm is the broker's ack for that message. Without it, the client library may have buffered bytes that never arrived. `RabbitMqJobPublisher` opens its channel with confirmation tracking, so `BasicPublishAsync` waits for the ack and throws on a nack.
+3. If no queue is bound to `job.process`, RabbitMQ drops the message unless `mandatory` is set. With it, the message comes back and the publisher treats it as a failure instead of marking the job `Queued`.
+4. A row without a message can be found and explained later. A message without a row is an id the worker cannot load. The API commits `Pending` first for that reason.
+5. 503 Problem Details titled "RabbitMQ is unavailable." with `jobId` and `jobStatus: "Pending"`. `GET` of that id returns `Pending`. `JobPublishingTests` checks both.
+6. A message in `taskflow.jobs.process` for a row that says `Pending`. The API returns 503 with the `jobId`. The consumer task has to handle that delivery.
+7. The row is the system of record and the payload can hold user data. The message carries `jobId`, `type`, and `correlationId`, and the integration test checks that a payload value is not in the body.
+
+### Deep dive
+
+#### What "confirmed" means in RabbitMQ.Client 7
+
+In 7.x, `CreateChannelOptions(publisherConfirmationsEnabled: true, publisherConfirmationTrackingEnabled: true)` makes the client track each delivery tag. `BasicPublishAsync` then completes only when the broker sends `basic.ack` for that tag. A `basic.nack` throws `PublishException`. A `basic.return`, which happens with `mandatory: true` and no matching queue, throws a `PublishException` with `IsReturn` set. `RabbitMqJobPublisher` maps both to `JobPublishFailedException`.
+
+The linked `CancellationTokenSource` adds the timeout. A timeout cancels the wait, not the broker's work. If the broker accepted the message just before the timeout, the API reports a failure for a message that exists. That is the "lost confirm" case, and it is why the consumer has to be idempotent anyway.
+
+#### Why the topology is declared by the producer
+
+Declares are idempotent when the arguments match. The API declares before its first publish so a fresh container works. `First_publish_declares_the_exchange_queue_and_binding` deletes both, submits a job, and then checks them with passive declares. When the worker exists, it will declare the same topology, so either process can start first.
+
+### Things I should remember
+
+- `Queued` means the broker confirmed. It does not mean a worker has seen it.
+- Store, publish, mark. Two SQL transactions with a publish between them.
+- 503 with `jobId` means the row exists and is `Pending`.
+- `status` in Problem Details is the HTTP code. The job's state is `jobStatus`.
+- The next task is the consumer, with manual ack, and it must cope with a delivery for a `Pending` row.
+
+## Task: Worker consumer and job handlers
+
+### What we built
+
+`TaskFlow.Worker` now does work. It consumes `taskflow.jobs.process` with manual acknowledgement and prefetch 1. For each message, it loads the job from SQL Server, claims it, runs the handler for the job type, saves `Succeeded` or `Failed`, and only then acks.
+
+Handlers are small classes behind `IJobHandler`: `demo.success`, `demo.permanent-failure`, `demo.slow`, `email.send` (simulated), `report.generate`, and `data.process`. `JobHandlerRegistry` is the one list of types. The API rejects any type that is not in it, so `demo.transient-failure` returns 400 until Phase 4 adds retries.
+
+### Why we built it
+
+After the publisher task, jobs piled up in the queue as `Queued`. This task is the other half of "asynchronous": a separate process that picks the work up and records what happened.
+
+### How it works
+
+1. `Program.cs` in `TaskFlow.Worker` calls `AddTaskFlowApplication`, `AddTaskFlowInfrastructure`, and `AddTaskFlowJobConsumer`. The last one throws at startup if either connection string is missing.
+2. `RabbitMqJobConsumer.ExecuteAsync` connects (retrying every `ConnectRetryDelay` while RabbitMQ is down), opens a channel, calls `BasicQosAsync(prefetch: 1)`, and starts `BasicConsumeAsync(autoAck: false)`.
+3. For each delivery, it parses `{ jobId, type, correlationId }`. If that fails, it calls `BasicRejectAsync(requeue: false)`.
+4. It opens a DI scope and calls `JobProcessor.ProcessAsync(jobId, workerId)`:
+   - not found: return `SkippedNotFound`
+   - `Pending`: call `MarkQueued`. The message proves the publish happened.
+   - not `Queued`: return `SkippedNotQueued` without calling the handler
+   - `Queued`: `StartProcessing` and save (the claim, with a new attempt row), run the handler, `CompleteSuccessfully` or `FailPermanently`, save
+5. Every return value means "the outcome is saved", so the consumer calls `BasicAckAsync`.
+6. If SQL Server is unavailable, the consumer waits `DatabaseRetryDelay` and calls `BasicNackAsync(requeue: true)`.
+7. On shutdown, it cancels the consumer and waits for the in-flight message to finish and ack.
+
+### Simple analogy
+
+The kitchen is open. A cook takes one slip off the rail at a time (prefetch 1), checks the order book to see if that order is still waiting, writes "cooking, by cook 3" in the book (the claim), cooks, writes "served" or "couldn't make it", and only then throws the slip away (the ack). If the book already says "served", the cook throws the slip away without cooking again.
+
+### Important concepts learned
+
+- The ack is the last step, after the outcome save. Ack means "RabbitMQ can forget this message", not "the job succeeded". A `Failed` job is acked too.
+- Prefetch is how many unacked messages RabbitMQ will push to one consumer. With 1, a slow job does not hold other jobs hostage on this worker.
+- The row decides what a delivery means. The same message can be the first delivery, a redelivery, or a duplicate. Only a `Queued` row runs.
+- `ack`, `nack(requeue: true)`, and `reject(requeue: false)` are three different decisions: done, try later, and throw away.
+- A handler knows only its `JobContext`. It does not know about RabbitMQ, EF Core, or the ack.
+
+### Important code locations
+
+| File | What it does |
+| --- | --- |
+| `src/TaskFlow.Application/Jobs/JobProcessor.cs` | Skip rules, Pending promotion, claim, handler run, outcome save |
+| `src/TaskFlow.Application/Jobs/Handlers/IJobHandler.cs` | `IJobHandler`, `JobContext`, `JobHandlerResult` |
+| `src/TaskFlow.Application/Jobs/Handlers/JobHandlerRegistry.cs` | The single list of job types, used by the API and the worker |
+| `src/TaskFlow.Application/Jobs/Handlers/DemoHandlers.cs` | `demo.success`, `demo.permanent-failure`, `demo.slow` |
+| `src/TaskFlow.Application/Jobs/Handlers/SimulatedHandlers.cs` | `email.send`, `report.generate`, `data.process` |
+| `src/TaskFlow.Infrastructure/Messaging/RabbitMqJobConsumer.cs` | Prefetch, manual ack, reject, delayed nack, graceful stop |
+| `src/TaskFlow.Infrastructure/Messaging/WorkerOptions.cs` | `PrefetchCount`, `WorkerId`, `DatabaseRetryDelay`, `ConnectRetryDelay` |
+| `src/TaskFlow.Infrastructure/DependencyInjection.cs` | `AddTaskFlowJobConsumer` |
+| `src/TaskFlow.Infrastructure/Persistence/Migrations/20261003150720_JobClientGeneratedIds.cs` | Snapshot-only migration for client-generated ids |
+| `src/TaskFlow.Worker/Program.cs` | The worker composition root |
+| `tests/TaskFlow.UnitTests/Jobs/JobProcessorTests.cs` | Every processor branch and the handler payload checks |
+| `tests/TaskFlow.IntegrationTests/WorkerTests.cs` | The real consumer against real SQL Server and RabbitMQ |
+
+### Database impact
+
+Two saves per run: the claim (`Processing` plus a new `JobAttempts` row) and the outcome. Migration `JobClientGeneratedIds` has empty `Up` and `Down`. It only records in the model that `Jobs.Id` and `JobAttempts.Id` are set by the code, not the database.
+
+### Messaging impact
+
+The worker is the first consumer. RabbitMQ now deletes a message only after the worker acks it. An unacked message goes back to the queue if the worker's channel closes.
+
+### Failure scenarios
+
+- Duplicate message for a finished job: acked, no second attempt. Test: `A_duplicate_message_for_a_succeeded_job_is_acked_without_a_second_attempt`.
+- Message for a `Pending` row (the publish-then-save window): promoted and run. Test: `A_message_for_a_pending_row_promotes_and_runs_the_job`.
+- Unreadable body: rejected, dropped, the queue keeps moving. Test: `An_unreadable_message_is_rejected_and_does_not_block_the_queue`.
+- Unknown type in a stored row: `Failed` with `NoHandlerRegistered`. Unit test only.
+- Handler throws: `Failed` with the exception type name. Unit test only.
+- SQL Server down: delayed nack with requeue. Implemented, not covered by a test that stops SQL Server.
+- Worker crash after the claim: the row stays `Processing` and the redelivery is skipped. The job is stuck. **Known gap, Phase 5.**
+- Two workers loading the same `Queued` row at the same moment: both could claim it, because the claim is a plain save. **Known gap, Phase 5.**
+
+### Why this design?
+
+Deciding from the row means a duplicate message cannot run a finished job again. Acking after the save means a crash before the save gives the job back to RabbitMQ instead of losing it.
+
+Promoting `Pending` is safe because the API inserts the row before it publishes. A message cannot exist for a row that was never stored.
+
+Treating handler exceptions as permanent is a deliberate placeholder. Without a retry policy, the other choices are a requeue loop or a stuck message.
+
+The database-outage nack waits first, so a SQL outage costs one requeue per message every 5 seconds instead of a hot loop.
+
+### Alternatives
+
+- `autoAck: true`. Rejected: a crash mid-handler would lose the job.
+- Ack at the start of the handler. Rejected: same loss, just later.
+- Requeue a failed handler with `BasicNack(requeue: true)`. Rejected: this is the infinite retry loop the rules forbid. Phase 4 schedules retries with `NextAttemptAt`.
+- Put the handlers in Infrastructure. Rejected: they are business steps, and the API also needs the type list.
+- Higher prefetch with parallel handlers. Rejected for now: one message at a time keeps one obvious ack site. Scaling is by process, which is the next task.
+
+### Tradeoffs
+
+The worker is simple and honest about what it has done, but it cannot retry. A crash at the wrong moment strands a job in `Processing`. The integration tests prove one worker. They do not prove two workers or a real crash.
+
+### Interview questions
+
+1. When does TaskFlow ack a message, and why then?
+2. What happens when the same message arrives twice?
+3. What does prefetch 1 do?
+4. Why does a `Pending` row get processed instead of skipped?
+5. What is the difference between `nack(requeue: true)` and `reject(requeue: false)` here?
+6. What happens if the worker crashes after it claims a job?
+7. Why did the EF model need `ValueGeneratedNever`?
+
+### Interview answers
+
+1. After `JobProcessor` returns, which is after the outcome save. `RabbitMqJobConsumer` has one ack site, right after `ProcessAsync`. A crash before that save leaves the message unacked, so RabbitMQ delivers it again.
+2. The second delivery loads the row, sees `Succeeded`, and is acked without running the handler. `WorkerTests` republishes a message for a finished job and checks there is still one attempt.
+3. RabbitMQ pushes at most one unacked message to this worker. The next job waits in the queue, where another worker could take it.
+4. The API inserts before it publishes, so a message means the publish happened. A `Pending` row with a message is the "published, but the `Queued` save failed" window. `JobProcessor` calls `MarkQueued` and runs it. `WorkerTests` proves that with a row inserted as `Pending`.
+5. The nack is for a SQL outage: put the message back after a delay, because the job is fine and the database is not. The reject is for a body that is not a job message: throw it away, because no amount of retrying will parse it.
+6. The row stays `Processing`. The redelivery sees a status that is not `Queued` and skips it, so the job is stuck. That is a known gap, and Phase 5 handles stuck claims. Do not claim it is solved.
+7. EF assumes a Guid key is generated by the store. A new attempt with its id already set, added to a tracked job, looked like an existing row, and EF would have updated it instead of inserting it. Marking the ids as never generated makes EF insert the new attempt. The `WorkerTests` success test reads the attempt back.
+
+### Deep dive
+
+#### The EF key pitfall
+
+Phase 2 saved jobs with `Add`, which marks the whole graph as new, so the key setting never mattered. The worker does something different. It loads a tracked `Job`, and `StartProcessing` appends a `JobAttempt` to the private `_attempts` list. On `SaveChanges`, EF discovers that attempt through the navigation. With a store-generated key, EF treats an entity with a non-default key as one it should already know about, and marks it `Modified`. The SQL would be an `UPDATE` that matches zero rows, and EF would throw a concurrency exception. `ValueGeneratedNever` tells EF the code owns the id, so a newly discovered entity is `Added`. The column type did not change, which is why the migration's `Up` is empty. EF 10 still needs that migration, because it refuses to migrate when the model and the snapshot disagree.
+
+#### Graceful shutdown
+
+`JobProcessor` runs with `CancellationToken.None`, not the host's stopping token. On shutdown, the consumer cancels its subscription, waits for the in-flight message to be saved and acked, and then closes the channel. `demo.slow` is capped at 30 seconds, which is the default host shutdown timeout. A longer handler would be cut off by the host and its message would be redelivered.
+
+### Things I should remember
+
+- Ack after the outcome save. One ack site.
+- The row decides. Only `Queued` or `Pending` runs.
+- `Failed` jobs are acked too. Ack is not success.
+- Handler exceptions are permanent until Phase 4.
+- A crash after the claim strands the job. Phase 5.
+- The next task is two worker processes on one queue.

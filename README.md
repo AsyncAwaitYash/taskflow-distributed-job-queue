@@ -2,23 +2,26 @@
 
 TaskFlow is a small, production-style **distributed background job queue**. A client will submit a job to an ASP.NET Core API. The API will store the job in SQL Server and hand the work to RabbitMQ. Workers will process jobs, acknowledge messages manually, retry failures with exponential backoff and jitter, and dead-letter jobs that keep failing.
 
-**Phases 0–2 are in the repository.** Jobs can be stored in SQL Server. They stay `Pending` because RabbitMQ is not connected. Workers do not consume a queue yet.
+**Phases 0–2 and most of Phase 3 are in the repository.** Jobs are stored in SQL Server and published to RabbitMQ. A job is `Queued` only after the broker confirms. A worker process consumes the queue, runs the handler, saves `Succeeded` or `Failed`, and then acks. Retries are Phase 4.
 
 ## Status
 
 | Area | State |
 | --- | --- |
 | Solution skeleton (.NET 10) | Built |
-| `Job` / `JobAttempt` state machine | In memory, unit-tested |
-| SQL Server schema and job API | Create, list, and get. New jobs stay `Pending` |
-| RabbitMQ, workers that consume, Docker Compose | Not implemented |
+| `Job` / `JobAttempt` state machine | Unit-tested |
+| SQL Server schema and job API | Create, list, and get |
+| RabbitMQ topology and confirmed publisher | Built. New jobs are `Queued` |
+| Worker with manual ack and job handlers | Built. One process tested; two at once is next |
+| Retries, backoff, dead-lettering | Not implemented |
+| Docker Compose | Not implemented |
 | Serilog, health checks, OpenTelemetry | Not implemented |
 
 Read [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) before changing anything. The learning notes live in [docs/LEARNING_GUIDE.md](docs/LEARNING_GUIDE.md).
 
 ## Run it
 
-Requires the .NET 10 SDK (`10.0.401` or a later `10.0` feature band). See [global.json](global.json). Integration tests that touch SQL Server also require Docker.
+Requires the .NET 10 SDK (`10.0.401` or a later `10.0` feature band). See [global.json](global.json). Integration tests that touch SQL Server or RabbitMQ also require Docker.
 
 ```bash
 dotnet test TaskFlow.slnx
@@ -34,16 +37,24 @@ dotnet ef database update --project src/TaskFlow.Infrastructure --startup-projec
 
 `dotnet ef` is the local tool in `dotnet-tools.json`. Do not put the SQL password in `appsettings.json`.
 
+To submit jobs, also set `ConnectionStrings:RabbitMq` to an `amqp://` URI for a running broker (see [.env.example](.env.example)). Without it, `POST /api/v1/jobs` returns 503 and stores nothing. List and get still work.
+
+To run the jobs, start the worker with the same two connection strings. It refuses to start without them.
+
+```bash
+dotnet run --project src/TaskFlow.Worker
+```
+
 `scripts/verify.sh` builds the solution and runs the tests.
 
 ## Layout
 
 ```text
 src/TaskFlow.Api              HTTP composition root
-src/TaskFlow.Application      job submission and queries
+src/TaskFlow.Application      job submission, queries, JobProcessor, job handlers
 src/TaskFlow.Domain           job model and state machine
-src/TaskFlow.Infrastructure  EF Core, SQL Server, migrations
-src/TaskFlow.Worker           worker host (stays alive; consumes nothing)
+src/TaskFlow.Infrastructure  EF Core, SQL Server, migrations, RabbitMQ publisher and consumer
+src/TaskFlow.Worker           worker host (runs the RabbitMQ consumer)
 tests/TaskFlow.UnitTests
 tests/TaskFlow.IntegrationTests
 ```

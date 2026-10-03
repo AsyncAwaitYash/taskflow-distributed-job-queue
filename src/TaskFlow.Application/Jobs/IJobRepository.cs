@@ -9,4 +9,6 @@ public interface IJobRepository
     Task<Job?> GetAsync(Guid id, CancellationToken cancellationToken);
 
     Task<JobPage> ListAsync(JobListQuery query, CancellationToken cancellationToken);
+
+    Task SaveChangesAsync(CancellationToken cancellationToken);
 }

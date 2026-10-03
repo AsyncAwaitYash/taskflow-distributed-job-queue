@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace TaskFlow.IntegrationTests;
 
-[Collection(SqlServerCollection.Name)]
+[Collection(InfrastructureCollection.Name)]
 public sealed class JobPersistenceTests
 {
     private readonly string _connectionString;

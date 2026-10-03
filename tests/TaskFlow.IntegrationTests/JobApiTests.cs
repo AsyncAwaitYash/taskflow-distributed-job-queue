@@ -7,17 +7,18 @@ using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace TaskFlow.IntegrationTests;
 
-[Collection(SqlServerCollection.Name)]
+[Collection(InfrastructureCollection.Name)]
 public sealed class JobApiTests : IDisposable
 {
     private readonly WebApplicationFactory<Program> _factory;
     private readonly HttpClient _client;
 
-    public JobApiTests(SqlServerFixture sql)
+    public JobApiTests(SqlServerFixture sql, RabbitMqFixture rabbit)
     {
         _factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseSetting("ConnectionStrings:TaskFlow", sql.ConnectionString);
+            builder.UseSetting("ConnectionStrings:RabbitMq", rabbit.ConnectionString);
         });
         _client = _factory.CreateClient();
     }
@@ -29,7 +30,7 @@ public sealed class JobApiTests : IDisposable
     }
 
     [Fact]
-    public async Task Post_stores_a_pending_job_that_can_be_read_back()
+    public async Task Post_stores_a_queued_job_that_can_be_read_back()
     {
         HttpResponseMessage created = await _client.PostAsJsonAsync("/api/v1/jobs", new
         {
@@ -40,7 +41,7 @@ public sealed class JobApiTests : IDisposable
 
         Assert.Equal(HttpStatusCode.Created, created.StatusCode);
         JsonElement body = await created.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal("Pending", body.GetProperty("status").GetString());
+        Assert.Equal("Queued", body.GetProperty("status").GetString());
         Assert.Equal("demo.success", body.GetProperty("type").GetString());
         Assert.Equal("api-create", body.GetProperty("correlationId").GetString());
         Assert.Equal(5, body.GetProperty("maxAttempts").GetInt32());
@@ -51,7 +52,7 @@ public sealed class JobApiTests : IDisposable
         HttpResponseMessage fetched = await _client.GetAsync($"/api/v1/jobs/{body.GetProperty("id").GetGuid()}");
         Assert.Equal(HttpStatusCode.OK, fetched.StatusCode);
         JsonElement stored = await fetched.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal("Pending", stored.GetProperty("status").GetString());
+        Assert.Equal("Queued", stored.GetProperty("status").GetString());
         Assert.Equal("hello", stored.GetProperty("payload").GetProperty("message").GetString());
     }
 
@@ -78,6 +79,9 @@ public sealed class JobApiTests : IDisposable
     [Fact]
     public async Task List_filters_by_type_and_pages_the_matches()
     {
+        JsonElement before = await _client.GetFromJsonAsync<JsonElement>("/api/v1/jobs?type=demo.permanent-failure&pageSize=1");
+        int existing = before.GetProperty("totalCount").GetInt32();
+
         for (int index = 0; index < 3; index++)
         {
             HttpResponseMessage created = await _client.PostAsJsonAsync("/api/v1/jobs", new
@@ -91,7 +95,7 @@ public sealed class JobApiTests : IDisposable
         HttpResponseMessage page = await _client.GetAsync("/api/v1/jobs?type=demo.permanent-failure&page=1&pageSize=2");
         Assert.Equal(HttpStatusCode.OK, page.StatusCode);
         JsonElement body = await page.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal(3, body.GetProperty("totalCount").GetInt32());
+        Assert.Equal(existing + 3, body.GetProperty("totalCount").GetInt32());
         Assert.Equal(2, body.GetProperty("items").GetArrayLength());
         Assert.Equal("demo.permanent-failure", body.GetProperty("items")[0].GetProperty("type").GetString());
 

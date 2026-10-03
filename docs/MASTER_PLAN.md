@@ -32,23 +32,12 @@ Status: **done** (2026-10-03).
 
 ## Phase 3 — RabbitMQ and worker
 
-Status: **next**.
+Status: **in progress**.
 
-- ASP.NET Core job endpoints
-- EF Core, the first migration, SQL Server
-- Create, list, and get a job
-- Swagger and Problem Details
-- Pagination and filters (`status`, `type`, date range) after the basic flow works
-
-## Phase 3 — RabbitMQ and worker
-
-- Exchange `taskflow.jobs`, queue `taskflow.jobs.process`, routing key `job.process`
-- Publisher, worker consumer, manual ack
-- Handler abstraction and the demo handlers
-- Competing consumers (two worker processes)
-- End-to-end happy path
-
-Lock `RabbitMQ.Client` only in this phase, after re-checking the current NuGet release and the official .NET client guide.
+- Task 1, **done** (2026-10-03): exchange `taskflow.jobs`, queue `taskflow.jobs.process`, routing key `job.process`, and the confirmed publisher. `Job.MarkQueued` runs only after the broker confirms. A failed publish leaves the row `Pending` and returns 503. `RabbitMQ.Client` 7.2.2 is pinned.
+- Task 2, **done** (2026-10-03): worker consumer with manual ack and prefetch 1. Ack after the outcome is saved. `Pending` deliveries are promoted, other non-`Queued` deliveries are skipped.
+- Task 3, **done** (2026-10-03, same change as task 2): `IJobHandler`, `JobHandlerRegistry`, and the handlers that succeed or fail permanently. `demo.transient-failure` waits for Phase 4.
+- Task 4, **next**: competing consumers (two worker processes) and the end-to-end happy path
 
 ## Phase 4 — Reliability
 

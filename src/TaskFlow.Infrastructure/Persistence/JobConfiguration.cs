@@ -17,6 +17,9 @@ internal sealed class JobConfiguration : IEntityTypeConfiguration<Job>
 
         builder.HasKey(job => job.Id);
 
+        builder.Property(job => job.Id)
+            .ValueGeneratedNever();
+
         builder.Property(job => job.Type)
             .HasMaxLength(JobLimits.MaxTypeLength)
             .IsRequired();

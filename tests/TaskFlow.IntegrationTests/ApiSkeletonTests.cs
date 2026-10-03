@@ -16,7 +16,7 @@ public sealed class ApiSkeletonTests : IClassFixture<WebApplicationFactory<Progr
     }
 
     [Fact]
-    public async Task Get_root_returns_phase_zero_skeleton()
+    public async Task Get_root_reports_phase_and_unconfigured_dependencies()
     {
         HttpClient client = _factory.CreateClient();
 
@@ -27,10 +27,11 @@ public sealed class ApiSkeletonTests : IClassFixture<WebApplicationFactory<Progr
         JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("TaskFlow", body.GetProperty("name").GetString());
         Assert.Equal("running", body.GetProperty("status").GetString());
-        Assert.Equal(2, body.GetProperty("phase").GetInt32());
+        Assert.Equal(3, body.GetProperty("phase").GetInt32());
         Assert.False(body.GetProperty("jobProcessing").GetBoolean());
         Assert.False(body.GetProperty("databaseConfigured").GetBoolean());
-        Assert.Contains("not implemented", body.GetProperty("message").GetString(), StringComparison.OrdinalIgnoreCase);
+        Assert.False(body.GetProperty("messagingConfigured").GetBoolean());
+        Assert.Contains("not configured", body.GetProperty("message").GetString(), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
