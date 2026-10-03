@@ -13,16 +13,25 @@ public interface IJobHandler
 
 public sealed record JobContext(Guid JobId, string Type, string Payload, int AttemptNumber, string CorrelationId);
 
+public enum JobHandlerOutcome
+{
+    Succeeded,
+    RetryableFailure,
+    PermanentFailure
+}
+
 public sealed record JobHandlerResult
 {
-    private JobHandlerResult(bool succeeded, string? errorType, string? errorMessage)
+    private JobHandlerResult(JobHandlerOutcome outcome, string? errorType, string? errorMessage)
     {
-        Succeeded = succeeded;
+        Outcome = outcome;
         ErrorType = errorType;
         ErrorMessage = errorMessage;
     }
 
-    public bool Succeeded { get; }
+    public JobHandlerOutcome Outcome { get; }
+
+    public bool Succeeded => Outcome == JobHandlerOutcome.Succeeded;
 
     public string? ErrorType { get; }
 
@@ -30,7 +39,15 @@ public sealed record JobHandlerResult
 
     public static JobHandlerResult Success()
     {
-        return new JobHandlerResult(true, null, null);
+        return new JobHandlerResult(JobHandlerOutcome.Succeeded, null, null);
+    }
+
+    /// <summary>
+    /// Worth another try. The worker schedules it; the handler does not choose the delay.
+    /// </summary>
+    public static JobHandlerResult RetryableFailure(string errorType, string errorMessage)
+    {
+        return new JobHandlerResult(JobHandlerOutcome.RetryableFailure, errorType, errorMessage);
     }
 
     /// <summary>
@@ -38,6 +55,6 @@ public sealed record JobHandlerResult
     /// </summary>
     public static JobHandlerResult PermanentFailure(string errorType, string errorMessage)
     {
-        return new JobHandlerResult(false, errorType, errorMessage);
+        return new JobHandlerResult(JobHandlerOutcome.PermanentFailure, errorType, errorMessage);
     }
 }

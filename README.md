@@ -2,7 +2,7 @@
 
 TaskFlow is a small, production-style **distributed background job queue**. A client will submit a job to an ASP.NET Core API. The API will store the job in SQL Server and hand the work to RabbitMQ. Workers will process jobs, acknowledge messages manually, retry failures with exponential backoff and jitter, and dead-letter jobs that keep failing.
 
-**Phases 0–3 are in the repository.** Jobs are stored in SQL Server and published to RabbitMQ. A job is `Queued` only after the broker confirms. A worker process consumes the queue, runs the handler, saves `Succeeded` or `Failed`, and then acks. Retries are Phase 4.
+**Phases 0–3 and the start of Phase 4 are in the repository.** Jobs are stored in SQL Server and published to RabbitMQ. A job is `Queued` only after the broker confirms. A worker process consumes the queue, runs the handler, and acks after the save. A retryable failure becomes `RetryScheduled` with a jittered backoff, or `DeadLettered` when the attempts run out. Nothing republishes that job yet.
 
 ## Status
 
@@ -13,7 +13,7 @@ TaskFlow is a small, production-style **distributed background job queue**. A cl
 | SQL Server schema and job API | Create, list, and get |
 | RabbitMQ topology and confirmed publisher | Built. New jobs are `Queued` |
 | Worker with manual ack and job handlers | Built. Two workers compete for one queue |
-| Retries, backoff, dead-lettering | Not implemented |
+| Retries, backoff, dead-lettering | Classification and backoff are built. The scheduler is not |
 | Docker Compose | Not implemented |
 | Serilog, health checks, OpenTelemetry | Not implemented |
 

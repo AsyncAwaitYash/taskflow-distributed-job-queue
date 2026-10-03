@@ -4,8 +4,8 @@
 
 | Project | What it proves |
 | --- | --- |
-| `tests/TaskFlow.UnitTests` | Domain has no TaskFlow dependencies. Application references Domain only. Infrastructure references Application and Domain only. `Job` accepts only the legal status graph. `JobSubmissionService` stores before it publishes, marks `Queued` only after a confirmed publish, leaves the job `Pending` when the publish fails, reports a failed `Queued` save separately, and never publishes a rejected request. The publisher here is a recording fake in the test project. `JobProcessorTests`: a `Queued` job is claimed, run, and saved; a `Pending` row is promoted; terminal and `Processing` rows are skipped without running the handler; a missing handler and a thrown exception become `Failed` without storing the exception text; a SQL failure on the claim stops before the handler. Handler tests cover `demo.slow` and `email.send` payload checks, and the registry rejects duplicates and excludes `demo.transient-failure`. |
-| `tests/TaskFlow.IntegrationTests` | Without connection strings, `GET /` reports phase 3 and job routes return 503. Swagger lists the job paths. With Testcontainers SQL Server and RabbitMQ: create/list/get persist a `Queued` job; the message is persistent, routed through `taskflow.jobs` / `job.process`, and carries only `jobId`, `type`, and `correlationId`; the first publish declares the exchange and queue; an unreachable broker returns 503 with the `jobId` and the row stays `Pending`; a missing RabbitMQ setting returns 503 and stores nothing. `WorkerTests` starts the real consumer in-process (same extension calls as `TaskFlow.Worker`): `demo.success` reaches `Succeeded` with one attempt by `test-worker` and the queue drains; `demo.permanent-failure` reaches `Failed`; a duplicate message for a `Succeeded` job adds no attempt; a message for a `Pending` row runs the job; an unreadable message is rejected and does not block the queue. `CompetingConsumersTests` starts `worker-a` and `worker-b`, each with its own RabbitMQ connection, and waits for 2 consumers: 8 one-second `demo.slow` jobs all succeed with one attempt each, both worker ids appear, and the queue drains. A second test runs every handler end to end (`Succeeded` for five types, `Failed` for `demo.permanent-failure`) with a completed attempt and duration. `JobPersistenceTests` also checks that the migrations turn on `READ_COMMITTED_SNAPSHOT`. |
+| `tests/TaskFlow.UnitTests` | Domain has no TaskFlow dependencies. Application references Domain only. Infrastructure references Application and Domain only. `Job` accepts only the legal status graph. `JobSubmissionService` stores before it publishes, marks `Queued` only after a confirmed publish, leaves the job `Pending` when the publish fails, reports a failed `Queued` save separately, and never publishes a rejected request. The publisher here is a recording fake in the test project. `JobProcessorTests`: a `Queued` job is claimed, run, and saved; a `Pending` row is promoted; terminal and `Processing` rows are skipped without running the handler; a missing handler and a bad-input exception (`JsonException`) become `Failed` without storing the exception text; an unknown exception and a retryable result become `RetryScheduled` with `NextAttemptAt`, or `DeadLettered` on the last attempt; a SQL failure on the claim stops before the handler. `RetryBackoffPolicyTests` checks the jitter band and the 10-minute cap. `JobFailureClassifierTests` checks the permanent list. Handler tests cover `demo.slow`, `demo.transient-failure` (`failTimes`), and `email.send` payload checks, and the registry rejects duplicates. |
+| `tests/TaskFlow.IntegrationTests` | Without connection strings, `GET /` reports phase 3 and job routes return 503. Swagger lists the job paths. With Testcontainers SQL Server and RabbitMQ: create/list/get persist a `Queued` job; the message is persistent, routed through `taskflow.jobs` / `job.process`, and carries only `jobId`, `type`, and `correlationId`; the first publish declares the exchange and queue; an unreachable broker returns 503 with the `jobId` and the row stays `Pending`; a missing RabbitMQ setting returns 503 and stores nothing. `WorkerTests` starts the real consumer in-process (same extension calls as `TaskFlow.Worker`): `demo.success` reaches `Succeeded` with one attempt by `test-worker` and the queue drains; `demo.permanent-failure` reaches `Failed`; a duplicate message for a `Succeeded` job adds no attempt; a message for a `Pending` row runs the job; an unreadable message is rejected and does not block the queue; `demo.transient-failure` with `failTimes: 1` ends `RetryScheduled` with one attempt and a delay of 4–6 seconds, and the queue drains; `maxAttempts: 1` ends `DeadLettered` with `nextAttemptAt` null. `CompetingConsumersTests` starts `worker-a` and `worker-b`, each with its own RabbitMQ connection, and waits for 2 consumers: 8 one-second `demo.slow` jobs all succeed with one attempt each, both worker ids appear, and the queue drains. A second test runs every handler end to end (`Succeeded` for six types, including `demo.transient-failure` with `failTimes: 0`, and `Failed` for `demo.permanent-failure`) with a completed attempt and duration. `JobPersistenceTests` also checks that the migrations turn on `READ_COMMITTED_SNAPSHOT`. |
 
 Command:
 
@@ -15,7 +15,7 @@ dotnet test TaskFlow.slnx
 
 `scripts/verify.sh` builds, then tests.
 
-On 2026-10-03 with SDK 10.0.401: build 0 warnings, 91 tests passed (68 unit, 23 integration). The integration suite passed 5 consecutive runs.
+On 2026-10-03 with SDK 10.0.401: build 0 warnings, 123 tests passed (98 unit, 25 integration), run twice.
 
 The tests read `ConnectionStrings__TaskFlow` and `ConnectionStrings__RabbitMq` from the environment, as the app does. Clear them before running the tests in a terminal you used for `docs/DEMO.md`, or the "not configured" tests in `ApiSkeletonTests` fail.
 
@@ -34,17 +34,12 @@ The "unreachable broker" test points the API at `amqp://127.0.0.1:1` with a 3-se
 - The worker's delayed nack while SQL Server is down. The consumer handles it, but no test stops SQL Server.
 - A worker process killed mid-job.
 - Two real worker processes in the automated suite. The two hosts run in one test process. Two real processes were run by hand (`docs/DEMO.md`).
+- Invalid `TaskFlow:Retry` values rejected at startup. The options validator is in `AddTaskFlowApplication`; no test feeds it a bad value.
 
 ## What later phases add
 
-Unit:
-
-- Retry classification
-- Backoff and jitter bounds
-
 Integration:
 
-- Transient failure and max attempts
 - A real crash before ack
 - Two workers racing the same job id
 - Two scheduler passes racing the same retry

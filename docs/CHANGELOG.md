@@ -4,6 +4,12 @@
 
 ### Added
 
+- Retryable and permanent failure classification, exponential backoff with jitter (`TaskFlow:Retry`), and the `demo.transient-failure` handler. A retry is saved as `RetryScheduled` and the message is acked. The scheduler that publishes it later is not built yet. An exhausted budget is `DeadLettered`.
+
+## 2026-10-03
+
+### Added
+
 - Two workers can share one queue. `CompetingConsumersTests` and a recorded two-process run in `docs/DEMO.md`.
 - Worker launch profiles `worker-1` and `worker-2`.
 - Migration `EnableReadCommittedSnapshot`.

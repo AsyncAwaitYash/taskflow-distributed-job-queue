@@ -1,6 +1,6 @@
 # Architecture
 
-Status: the layering below is implemented as project references. The runtime path runs end to end: the API stores, publishes with a confirm, and marks `Queued`; one or more workers consume, claim, run a handler, save the outcome, and ack. Retries and conditional claims are **not built**.
+Status: the layering below is implemented as project references. The runtime path runs end to end: the API stores, publishes with a confirm, and marks `Queued`; one or more workers consume, claim, run a handler, save the outcome, and ack. A retryable failure is saved as `RetryScheduled` or `DeadLettered` and acked. The scheduler that republishes a due retry, and the conditional claim, are **not built**.
 
 ## Implemented layout
 
@@ -85,13 +85,13 @@ Workers are competing consumers. RabbitMQ decides which idle worker receives a m
 
 Redelivery: if the worker dies before ack, RabbitMQ delivers the same message again. The consumer loads the job and does nothing if the row is no longer `Queued` (or `Pending`). That is tested for a `Succeeded` job. A worker that dies after the claim leaves the row `Processing`, and the redelivery skips it, so the job is stuck until Phase 5 adds recovery.
 
-Retries do not use an immediate requeue. A retryable failure sets `NextAttemptAt` and a scheduler publishes the job again when it is due. That is how backoff exists without a delay plugin.
+Retries do not use an immediate requeue. A retryable failure sets `NextAttemptAt` through `RetryBackoffPolicy` and the worker acks. The scheduler that publishes the job when it is due is the next task, so a `RetryScheduled` job waits today.
 
 ## State machine
 
-Implemented in `Job` and `JobTransitions`. The API drives `Pending -> Queued`. The worker drives `Queued -> Processing -> Succeeded` and `Processing -> Failed`, and promotes a delivered `Pending` row to `Queued`. The retry transitions run only in the unit tests until Phase 4.
+Implemented in `Job` and `JobTransitions`. The API drives `Pending -> Queued`. The worker drives `Queued -> Processing -> Succeeded`, `Processing -> Failed`, and `Processing -> RetryScheduled` or `DeadLettered`, and promotes a delivered `Pending` row to `Queued`.
 
-`MarkQueued` publishes a `Pending` or `RetryScheduled` job. `RetryManually` is the only way back from `Failed` or `DeadLettered`, and it does not reset `AttemptCount` or `MaxAttempts`. `RecordRetryableFailure` schedules `NextAttemptAt` when attempts remain, and moves straight to `DeadLettered` when `AttemptCount` has reached `MaxAttempts`. The delay is an argument. The backoff policy is Phase 4.
+`MarkQueued` publishes a `Pending` or `RetryScheduled` job. `RetryManually` is the only way back from `Failed` or `DeadLettered`, and it does not reset `AttemptCount` or `MaxAttempts`. `RecordRetryableFailure` schedules `NextAttemptAt` when attempts remain, and moves straight to `DeadLettered` when `AttemptCount` has reached `MaxAttempts`. `RetryBackoffPolicy` supplies the delay. The scheduler that calls `MarkQueued` on a due row is the next task.
 
 Normal:
 

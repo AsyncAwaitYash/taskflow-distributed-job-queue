@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 using TaskFlow.Application.Jobs;
 using TaskFlow.Application.Jobs.Handlers;
 using TaskFlow.Domain.Jobs;
@@ -31,7 +33,7 @@ public sealed class JobProcessorTests
     {
         Job job = QueuedJob("demo.permanent-failure");
         TrackingRepository repository = new(job);
-        JobProcessor processor = new(repository, JobHandlerSet.Registry(new FixedTimeProvider(Now)), new FixedTimeProvider(Now));
+        JobProcessor processor = new(repository, JobHandlerSet.Registry(new FixedTimeProvider(Now)), TestBackoff.Exact(), new FixedTimeProvider(Now));
 
         JobProcessingOutcome outcome = await processor.ProcessAsync(job.Id, "worker-1", CancellationToken.None);
 
@@ -101,7 +103,7 @@ public sealed class JobProcessorTests
     [Fact]
     public async Task A_type_without_a_handler_fails_permanently()
     {
-        Job job = QueuedJob("demo.transient-failure");
+        Job job = QueuedJob("not.a.registered.type");
         TrackingRepository repository = new(job);
 
         JobProcessingOutcome outcome = await CreateProcessor(repository).ProcessAsync(job.Id, "worker-1", CancellationToken.None);
@@ -111,7 +113,22 @@ public sealed class JobProcessorTests
     }
 
     [Fact]
-    public async Task A_handler_exception_fails_the_job_without_storing_the_exception_message()
+    public async Task A_permanent_exception_fails_the_job_without_storing_the_exception_message()
+    {
+        Job job = QueuedJob("demo.success");
+        TrackingRepository repository = new(job);
+        ThrowingHandler handler = new("demo.success", new JsonException("secret payload value"));
+
+        JobProcessingOutcome outcome = await CreateProcessor(repository, handler).ProcessAsync(job.Id, "worker-1", CancellationToken.None);
+
+        Assert.Equal(JobProcessingOutcome.Failed, outcome);
+        JobAttempt attempt = Assert.Single(job.Attempts);
+        Assert.Equal(nameof(JsonException), attempt.ErrorType);
+        Assert.DoesNotContain("secret", attempt.ErrorMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task An_unknown_exception_schedules_a_retry_without_storing_the_exception_message()
     {
         Job job = QueuedJob("demo.success");
         TrackingRepository repository = new(job);
@@ -119,10 +136,43 @@ public sealed class JobProcessorTests
 
         JobProcessingOutcome outcome = await CreateProcessor(repository, handler).ProcessAsync(job.Id, "worker-1", CancellationToken.None);
 
-        Assert.Equal(JobProcessingOutcome.Failed, outcome);
+        Assert.Equal(JobProcessingOutcome.RetryScheduled, outcome);
+        Assert.Equal(Now.AddSeconds(5), job.NextAttemptAt);
         JobAttempt attempt = Assert.Single(job.Attempts);
+        Assert.Equal(JobAttemptOutcome.RetryableFailure, attempt.Outcome);
         Assert.Equal(nameof(InvalidOperationException), attempt.ErrorType);
         Assert.DoesNotContain("secret", attempt.ErrorMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_retryable_result_schedules_the_next_attempt()
+    {
+        Job job = QueuedJob("demo.success");
+        TrackingRepository repository = new(job);
+        CountingHandler handler = new("demo.success", JobHandlerResult.RetryableFailure("UpstreamTimeout", "try later"));
+
+        JobProcessingOutcome outcome = await CreateProcessor(repository, handler).ProcessAsync(job.Id, "worker-1", CancellationToken.None);
+
+        Assert.Equal(JobProcessingOutcome.RetryScheduled, outcome);
+        Assert.Equal(JobStatus.RetryScheduled, job.Status);
+        Assert.Equal(Now.AddSeconds(5), job.NextAttemptAt);
+        Assert.Equal(JobAttemptOutcome.RetryableFailure, Assert.Single(job.Attempts).Outcome);
+    }
+
+    [Fact]
+    public async Task A_retryable_result_on_the_last_attempt_dead_letters_the_job()
+    {
+        Job job = Job.Create("demo.success", "{}", 1, Now);
+        job.MarkQueued(Now);
+        TrackingRepository repository = new(job);
+        CountingHandler handler = new("demo.success", JobHandlerResult.RetryableFailure("UpstreamTimeout", "try later"));
+
+        JobProcessingOutcome outcome = await CreateProcessor(repository, handler).ProcessAsync(job.Id, "worker-1", CancellationToken.None);
+
+        Assert.Equal(JobProcessingOutcome.DeadLettered, outcome);
+        Assert.Equal(JobStatus.DeadLettered, job.Status);
+        Assert.Null(job.NextAttemptAt);
+        Assert.Equal(JobAttemptOutcome.RetryableFailure, Assert.Single(job.Attempts).Outcome);
     }
 
     [Fact]
@@ -149,13 +199,50 @@ public sealed class JobProcessorTests
     }
 
     [Fact]
-    public void The_registry_does_not_include_the_transient_failure_demo_yet()
+    public void The_registry_includes_the_transient_failure_demo()
     {
         JobHandlerRegistry registry = JobHandlerSet.Registry(new FixedTimeProvider(Now));
 
-        Assert.False(registry.IsRegistered("demo.transient-failure"));
-        Assert.True(registry.IsRegistered("demo.slow"));
-        Assert.Equal(6, registry.Types.Count);
+        Assert.True(registry.IsRegistered("demo.transient-failure"));
+        Assert.Equal(7, registry.Types.Count);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task Demo_transient_failure_fails_until_fail_times_is_passed(int failTimes)
+    {
+        DemoTransientFailureHandler handler = new();
+        string payload = $$"""{"failTimes":{{failTimes}}}""";
+
+        for (int attempt = 1; attempt <= failTimes; attempt++)
+        {
+            JobHandlerResult failed = await handler.HandleAsync(Context(payload, attempt), CancellationToken.None);
+            Assert.Equal(JobHandlerOutcome.RetryableFailure, failed.Outcome);
+            Assert.Equal("DemoTransientFailure", failed.ErrorType);
+        }
+
+        JobHandlerResult succeeded = await handler.HandleAsync(Context(payload, failTimes + 1), CancellationToken.None);
+        Assert.True(succeeded.Succeeded);
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("""{"failTimes":-1}""")]
+    [InlineData("""{"failTimes":21}""")]
+    [InlineData("""{"failTimes":"2"}""")]
+    public async Task Demo_transient_failure_rejects_a_bad_fail_times(string payload)
+    {
+        JobHandlerResult result = await new DemoTransientFailureHandler().HandleAsync(Context(payload, 1), CancellationToken.None);
+
+        Assert.Equal(JobHandlerOutcome.PermanentFailure, result.Outcome);
+        Assert.Equal("InvalidPayload", result.ErrorType);
+    }
+
+    private static JobContext Context(string payload, int attemptNumber)
+    {
+        return new JobContext(Guid.NewGuid(), "demo.transient-failure", payload, attemptNumber, "corr");
     }
 
     [Theory]
@@ -212,7 +299,7 @@ public sealed class JobProcessorTests
     private static JobProcessor CreateProcessor(TrackingRepository repository, params IJobHandler[] handlers)
     {
         FixedTimeProvider clock = new(Now);
-        return new JobProcessor(repository, new JobHandlerRegistry(handlers), clock);
+        return new JobProcessor(repository, new JobHandlerRegistry(handlers), TestBackoff.Exact(), clock);
     }
 
     private sealed class CountingHandler : IJobHandler

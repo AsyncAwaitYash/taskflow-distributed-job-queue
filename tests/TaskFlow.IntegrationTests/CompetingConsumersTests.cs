@@ -73,6 +73,7 @@ public sealed class CompetingConsumersTests : IAsyncLifetime
         (string Type, object Payload, string Expected)[] cases =
         [
             ("demo.success", new { message = "hello" }, "Succeeded"),
+            ("demo.transient-failure", new { failTimes = 0 }, "Succeeded"),
             ("demo.slow", new { seconds = 0 }, "Succeeded"),
             ("email.send", new { to = "someone@example.com" }, "Succeeded"),
             ("report.generate", new { name = "daily" }, "Succeeded"),

@@ -110,13 +110,13 @@ Clear the variables before running `dotnet test` in the same terminal. Otherwise
 ## Not in this demo
 
 - Killing a worker in the middle of a job. Today the job would stay `Processing` (Phase 5).
-- Retries. `demo.transient-failure` returns 400 until Phase 4.
+- Republishing a retry. `demo.transient-failure` now ends as `RetryScheduled` and then waits, because the scheduler is the next task.
 
 ## Planned demo
 
 These steps become true in later phases. They are a checklist, not a script.
 
-1. Phase 4: submit `demo.transient-failure`. Show `RetryScheduled`, a growing delay, then success.
-2. Phase 4: exhaust `maxAttempts`. Show `DeadLettered`. Retry it through `POST /api/v1/jobs/{id}/retry`.
+1. After the scheduler: submit `demo.transient-failure` with `failTimes` greater than 0. Show `RetryScheduled`, the wait, a new publish, then success.
+2. Phase 4: `POST /api/v1/jobs/{id}/retry` on a `DeadLettered` job. Exhausting `maxAttempts` already reaches `DeadLettered` today.
 3. Phase 5: kill a worker mid-job and show the job recovered, not stuck in `Processing`.
 4. Phase 6: `docker compose up` replaces steps 1–4 above, with structured logs and health checks.

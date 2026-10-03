@@ -7,6 +7,8 @@ public enum JobProcessingOutcome
 {
     Succeeded,
     Failed,
+    RetryScheduled,
+    DeadLettered,
     SkippedNotFound,
     SkippedNotQueued
 }
@@ -21,12 +23,18 @@ public sealed class JobProcessor
 
     private readonly IJobRepository _repository;
     private readonly JobHandlerRegistry _handlers;
+    private readonly RetryBackoffPolicy _backoff;
     private readonly TimeProvider _clock;
 
-    public JobProcessor(IJobRepository repository, JobHandlerRegistry handlers, TimeProvider clock)
+    public JobProcessor(
+        IJobRepository repository,
+        JobHandlerRegistry handlers,
+        RetryBackoffPolicy backoff,
+        TimeProvider clock)
     {
         _repository = repository;
         _handlers = handlers;
+        _backoff = backoff;
         _clock = clock;
     }
 
@@ -55,17 +63,34 @@ public sealed class JobProcessor
         JobHandlerResult result = await RunHandlerAsync(job, attempt, cancellationToken);
 
         DateTimeOffset completedAt = _clock.GetUtcNow();
-        if (result.Succeeded)
-        {
-            job.CompleteSuccessfully(completedAt);
-        }
-        else
-        {
-            job.FailPermanently(result.ErrorType!, result.ErrorMessage!, completedAt);
-        }
-
+        JobProcessingOutcome outcome = Apply(job, attempt, result, completedAt);
         await _repository.SaveChangesAsync(cancellationToken);
-        return result.Succeeded ? JobProcessingOutcome.Succeeded : JobProcessingOutcome.Failed;
+        return outcome;
+    }
+
+    private JobProcessingOutcome Apply(Job job, JobAttempt attempt, JobHandlerResult result, DateTimeOffset completedAt)
+    {
+        switch (result.Outcome)
+        {
+            case JobHandlerOutcome.Succeeded:
+                job.CompleteSuccessfully(completedAt);
+                return JobProcessingOutcome.Succeeded;
+
+            case JobHandlerOutcome.PermanentFailure:
+                job.FailPermanently(result.ErrorType!, result.ErrorMessage!, completedAt);
+                return JobProcessingOutcome.Failed;
+
+            case JobHandlerOutcome.RetryableFailure:
+                // RecordRetryableFailure dead-letters instead when the attempt budget is spent.
+                DateTimeOffset nextAttemptAt = completedAt + _backoff.GetDelay(attempt.AttemptNumber);
+                job.RecordRetryableFailure(result.ErrorType!, result.ErrorMessage!, completedAt, nextAttemptAt);
+                return job.Status == JobStatus.DeadLettered
+                    ? JobProcessingOutcome.DeadLettered
+                    : JobProcessingOutcome.RetryScheduled;
+
+            default:
+                throw new InvalidOperationException($"Unhandled handler outcome {result.Outcome}.");
+        }
     }
 
     private async Task<JobHandlerResult> RunHandlerAsync(Job job, JobAttempt attempt, CancellationToken cancellationToken)
@@ -83,10 +108,12 @@ public sealed class JobProcessor
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
-            // Until the Phase 4 classifier exists, an unexpected error is not retried.
             // The message text is not stored because it can echo payload values.
             string errorType = exception.GetType().Name;
-            return JobHandlerResult.PermanentFailure(errorType, $"The handler threw {errorType}.");
+            string message = $"The handler threw {errorType}.";
+            return JobFailureClassifier.IsPermanent(exception)
+                ? JobHandlerResult.PermanentFailure(errorType, message)
+                : JobHandlerResult.RetryableFailure(errorType, message);
         }
     }
 }

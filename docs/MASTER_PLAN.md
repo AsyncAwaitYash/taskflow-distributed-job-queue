@@ -41,10 +41,10 @@ Status: **done** (2026-10-03).
 
 ## Phase 4 — Reliability
 
-Status: **next**.
+Status: **in progress**. Task 1 is done.
 
-- Task 1, **next**: failure classification (retryable versus permanent, including unexpected exceptions) and the exponential backoff with jitter policy, configured rather than hard-coded. The worker records `RetryScheduled` with `NextAttemptAt` through `Job.RecordRetryableFailure`, and `DeadLettered` when attempts run out. Add the `demo.transient-failure` handler.
-- Task 2: the `NextAttemptAt` retry scheduler and its filtered `(Status, NextAttemptAt)` index. It conditionally moves due jobs to `Queued` and publishes them.
+- Task 1, **done** (2026-10-03): `JobFailureClassifier` and `RetryBackoffPolicy` (`TaskFlow:Retry`, default about 5s, 25s, 125s, then 10m, jitter 0.2). The worker saves `RetryScheduled` with `NextAttemptAt`, or `DeadLettered` when the budget is spent, and acks. `demo.transient-failure` takes `{ "failTimes": 0-20 }`. Unknown exceptions are retryable; bad input is permanent.
+- Task 2, **next**: the `NextAttemptAt` retry scheduler and its filtered `(Status, NextAttemptAt)` index. It conditionally moves due jobs to `Queued` and publishes them.
 - Task 3: `POST /api/v1/jobs/{id}/retry` for `Failed` and `DeadLettered` jobs, `409` when the status cannot transition.
 
 ## Phase 5 — Idempotency and concurrency

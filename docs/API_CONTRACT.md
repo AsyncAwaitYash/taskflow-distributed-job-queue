@@ -1,6 +1,6 @@
 # API contract
 
-Status: **create, list, and get are implemented.** Create publishes to RabbitMQ and returns `Queued` only after the broker confirms. A running `TaskFlow.Worker` then moves the job to `Processing` and `Succeeded` or `Failed`; poll `GET /api/v1/jobs/{id}` to see it. Retry and cancel are not implemented.
+Status: **create, list, and get are implemented.** Create publishes to RabbitMQ and returns `Queued` only after the broker confirms. A running `TaskFlow.Worker` then moves the job to `Processing` and then `Succeeded`, `Failed`, `RetryScheduled`, or `DeadLettered`; poll `GET /api/v1/jobs/{id}` to see it. The scheduler that republishes a due retry, the manual retry route, and cancel are not implemented.
 
 Base path: `/api/v1/jobs`.
 
@@ -106,12 +106,12 @@ The API accepts exactly the types that have a handler. The handlers live in `src
 | `email.send` | Simulated. Needs a non-empty `to` string, otherwise `InvalidPayload`. No SMTP. The recipient is not logged | Implemented |
 | `report.generate` | Simulated. Succeeds | Implemented |
 | `data.process` | Simulated. Succeeds | Implemented |
-| `demo.transient-failure` | Fails for the first N attempts, then succeeds | Planned for Phase 4. Rejected with 400 today |
+| `demo.transient-failure` | Payload `{ "failTimes": 0-20 }`. Retryable failure for that many attempts, then success. A bad payload is `InvalidPayload` and the job is `Failed`. Nothing republishes a `RetryScheduled` job yet | Implemented |
 
-A handler exception is recorded as a permanent failure with the exception type name as `errorType`. The exception message is not stored. Phase 4 adds retryable failures.
+A handler exception is stored as its type name in `errorType`. The exception message is not stored. Bad input is `Failed`; other exceptions are retryable (see Statuses).
 
 ## Status values
 
 The domain enum `JobStatus` is `Pending`, `Queued`, `Processing`, `Succeeded`, `RetryScheduled`, `Failed`, `DeadLettered`.
 
-Clients must not send a status. The server moves the job through `Job`. Today `GET` can return `Pending`, `Queued`, `Processing`, `Succeeded`, and `Failed`.
+Clients must not send a status. The server moves the job through `Job`. `GET` can return `Pending`, `Queued`, `Processing`, `Succeeded`, `Failed`, `RetryScheduled` (with `nextAttemptAt`), and `DeadLettered`. A handler exception is stored as its type name. Bad input (`JsonException`, `ArgumentException`, `FormatException`, `NotSupportedException`) is `Failed`. Anything else is `RetryScheduled` until the attempt budget runs out, then `DeadLettered`.

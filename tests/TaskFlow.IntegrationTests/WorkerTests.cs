@@ -110,6 +110,37 @@ public sealed class WorkerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_transient_failure_is_scheduled_instead_of_requeued()
+    {
+        DateTimeOffset submittedAt = DateTimeOffset.UtcNow;
+        Guid jobId = await TestJobApi.SubmitAsync(_client, "demo.transient-failure", new { failTimes = 1 }, maxAttempts: 3);
+
+        JsonElement job = await TestJobApi.WaitForStatusAsync(_client, jobId, "RetryScheduled");
+
+        JsonElement attempt = Assert.Single(job.GetProperty("attempts").EnumerateArray());
+        Assert.Equal("RetryableFailure", attempt.GetProperty("outcome").GetString());
+        Assert.Equal("DemoTransientFailure", attempt.GetProperty("errorType").GetString());
+
+        TimeSpan wait = job.GetProperty("nextAttemptAt").GetDateTimeOffset() - attempt.GetProperty("completedAt").GetDateTimeOffset();
+        Assert.InRange(wait, TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(6));
+        Assert.True(job.GetProperty("nextAttemptAt").GetDateTimeOffset() > submittedAt);
+
+        await StopWorkerAsync();
+        Assert.Equal(0u, await TestWorkerHost.ReadyMessageCountAsync(_rabbit));
+    }
+
+    [Fact]
+    public async Task A_retryable_failure_on_the_only_attempt_is_dead_lettered()
+    {
+        Guid jobId = await TestJobApi.SubmitAsync(_client, "demo.transient-failure", new { failTimes = 5 }, maxAttempts: 1);
+
+        JsonElement job = await TestJobApi.WaitForStatusAsync(_client, jobId, "DeadLettered");
+
+        Assert.Equal(JsonValueKind.Null, job.GetProperty("nextAttemptAt").ValueKind);
+        Assert.Equal("RetryableFailure", Assert.Single(job.GetProperty("attempts").EnumerateArray()).GetProperty("outcome").GetString());
+    }
+
+    [Fact]
     public async Task An_unreadable_message_is_rejected_and_does_not_block_the_queue()
     {
         await PublishRawAsync(Encoding.UTF8.GetBytes("not json"));

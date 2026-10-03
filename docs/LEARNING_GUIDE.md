@@ -4,7 +4,7 @@ This is the textbook for the repository. If a sentence describes behavior, the c
 
 ## What is TaskFlow?
 
-**Status: jobs are stored in SQL Server, published to RabbitMQ, and run by one or more competing worker processes that ack after saving the outcome. Retries are not built.**
+**Status: jobs are stored in SQL Server, published to RabbitMQ, and run by one or more competing worker processes. A retryable failure is saved as `RetryScheduled` with a jittered `NextAttemptAt`, or `DeadLettered` when attempts run out, and the message is acked. Nothing republishes a due retry yet.**
 
 TaskFlow will be a small background-job system. A client will ask an API to do something that should not block the HTTP call, such as "send this email" or "generate this report". The API will remember the job. A worker process, running separately, will do it later.
 
@@ -15,7 +15,7 @@ You are building it to learn two ideas well enough to explain in an interview:
 
 It is not a SaaS product. Swagger will be the UI. There is no React app.
 
-Today `POST /api/v1/jobs` inserts a `Pending` row, publishes the job id to RabbitMQ, waits for the broker to confirm, and then marks the row `Queued`. `TaskFlow.Worker` takes the message from `taskflow.jobs.process`, loads the row, runs the handler for the job type, saves `Succeeded` or `Failed`, and acks. The retry statuses (`RetryScheduled`, `DeadLettered`) are reached only in unit tests until Phase 4.
+Today `POST /api/v1/jobs` inserts a `Pending` row, publishes the job id to RabbitMQ, waits for the broker to confirm, and then marks the row `Queued`. `TaskFlow.Worker` takes the message from `taskflow.jobs.process`, loads the row, runs the handler, and acks after the save. The save can be `Succeeded`, `Failed`, `RetryScheduled` (with `NextAttemptAt`), or `DeadLettered`. Nothing republishes a due retry yet.
 
 ## The picture we are building (planned)
 
@@ -112,10 +112,10 @@ The worker pulls a message, loads the job from SQL Server, does the work, saves 
 | Acknowledgement | Implemented | Ack after the outcome save. ADR-003, ADR-009 |
 | Prefetch | Implemented | `TaskFlow:Worker:PrefetchCount`, default 1 |
 | Redelivery | Implemented, skip rule only | A non-`Queued` row is acked without running. ADR-009 |
-| Retries | Designed | ADR-005 |
-| Exponential backoff | Designed | ADR-005 |
-| Jitter | Designed | ADR-005 |
-| Dead lettering | Designed | Status `DeadLettered`, not a second RabbitMQ queue in v1 |
+| Retries | Implemented (no scheduler yet) | `JobProcessor.Apply`, ADR-005 |
+| Exponential backoff | Implemented | `RetryBackoffPolicy` |
+| Jitter | Implemented | `RetryBackoffPolicy`, `Random.Shared.NextDouble` |
+| Dead lettering | Implemented | Status `DeadLettered`, not a second RabbitMQ queue |
 | Idempotency | Partial | Terminal redelivery is skipped. Conditional claim is Phase 5 |
 | At-least-once processing | Partial | Manual ack plus the skip rule. ADR-004 |
 | Eventual consistency | Implemented, with documented gaps | Store, publish, then mark `Queued`. `ARCHITECTURE.md` failure windows |
@@ -164,7 +164,7 @@ Synchronous: the client waits for the work. Asynchronous: the client waits for t
 
 ### Transient vs permanent failure
 
-Transient: worth trying later (timeout, simulated `demo.transient-failure`). Permanent: trying again will fail the same way (`demo.permanent-failure`, unknown job type, bad payload). Permanent failures go to `Failed`. They do not sit on the backoff schedule.
+Transient: worth trying later (`TimeoutException`, `InvalidOperationException`, `demo.transient-failure`). Permanent: trying again will fail the same way (`demo.permanent-failure`, unknown job type, bad payload, `JsonException`, `ArgumentException`, `FormatException`, `NotSupportedException`). Permanent failures go to `Failed`. Retryable ones go to `RetryScheduled` until `MaxAttempts`, then `DeadLettered`. An exception TaskFlow does not recognize is retryable.
 
 ### API response vs background completion
 
@@ -176,7 +176,7 @@ TaskFlow marks `Queued` only after the broker confirms, so the two stores disagr
 
 ## Failure scenarios I understand
 
-Scenarios 8 and 10 are implemented on the publish side (`JobPublishingTests`). Scenarios 2, 3, and 6 are implemented in the worker (`WorkerTests`, `JobProcessorTests`). Scenario 1 is implemented by manual ack, but a real crash is not tested yet. The rest are planned. Do not answer an interview with a planned scenario as if you have shipped it.
+Scenarios 8 and 10 are implemented on the publish side (`JobPublishingTests`). Scenarios 2, 3, 6, and 7 are implemented in the worker (`WorkerTests`, `JobProcessorTests`). Scenario 5 is implemented through the save and the ack; the later publish is planned. Scenario 1 is implemented by manual ack, but a real crash is not tested yet. The rest are planned. Do not answer an interview with a planned scenario as if you have shipped it.
 
 ### 1. Worker crashes before ack
 
@@ -206,8 +206,8 @@ Scenarios 8 and 10 are implemented on the publish side (`JobPublishingTests`). S
 
 ### 5. Transient failure requires a retry
 
-- Planned behavior: write `RetryScheduled` and `NextAttemptAt`, ack the current message, let the scheduler publish later.
-- Tradeoff: the job is quiet for a while. That is the point of backoff.
+- Implemented behavior: `RetryScheduled`, `NextAttemptAt`, one attempt with outcome `RetryableFailure`, message acked, queue empty. `A_transient_failure_is_scheduled_instead_of_requeued`. The scheduler that publishes when `NextAttemptAt` arrives is **planned**.
+- Tradeoff: the job is quiet for a while. That is the point of backoff. Until the scheduler exists, it stays quiet.
 - Interview question: Why ack if the job is not done?
 
 ### 6. Permanent failure should not retry forever
@@ -218,8 +218,8 @@ Scenarios 8 and 10 are implemented on the publish side (`JobPublishingTests`). S
 
 ### 7. Maximum attempts are reached
 
-- Planned behavior: `DeadLettered`, not another delay.
-- Tradeoff: a human can still call the manual retry endpoint. The queue will not spin by itself.
+- Implemented behavior: `DeadLettered`, `nextAttemptAt` null, the attempt still recorded as `RetryableFailure`. `A_retryable_failure_on_the_only_attempt_is_dead_lettered`. The manual retry endpoint is **planned**.
+- Tradeoff: the queue will not spin by itself. A later endpoint can ask for another try without raising `MaxAttempts`.
 - Interview question: Is dead-letter a RabbitMQ queue or a status? In this design it is a status. Say that clearly.
 
 ### 8. RabbitMQ is unavailable
@@ -765,7 +765,7 @@ Declares are idempotent when the arguments match. The API declares before its fi
 
 `TaskFlow.Worker` now does work. It consumes `taskflow.jobs.process` with manual acknowledgement and prefetch 1. For each message, it loads the job from SQL Server, claims it, runs the handler for the job type, saves `Succeeded` or `Failed`, and only then acks.
 
-Handlers are small classes behind `IJobHandler`: `demo.success`, `demo.permanent-failure`, `demo.slow`, `email.send` (simulated), `report.generate`, and `data.process`. `JobHandlerRegistry` is the one list of types. The API rejects any type that is not in it, so `demo.transient-failure` returns 400 until Phase 4 adds retries.
+Handlers are small classes behind `IJobHandler`: `demo.success`, `demo.permanent-failure`, `demo.slow`, `email.send` (simulated), `report.generate`, and `data.process`. `JobHandlerRegistry` is the one list of types. The API rejects any type that is not in it. At this point `demo.transient-failure` was rejected with 400. The next section registers it.
 
 ### Why we built it
 
@@ -890,7 +890,7 @@ Phase 2 saved jobs with `Add`, which marks the whole graph as new, so the key se
 - Ack after the outcome save. One ack site.
 - The row decides. Only `Queued` or `Pending` runs.
 - `Failed` jobs are acked too. Ack is not success.
-- Handler exceptions are permanent until Phase 4.
+- In this task every handler exception was permanent. The failure-classification section below splits bad input from retryable errors.
 - A crash after the claim strands the job. Phase 5.
 - The next task is two worker processes on one queue.
 
@@ -1011,4 +1011,100 @@ The `GET` reads `Jobs` and then `JobAttempts` for one job, taking shared locks. 
 - Wait for the consumer count before submitting jobs in a concurrency test.
 - A flaky test can be a real bug. This one was a deadlock.
 - Two workers holding the same job at once is still unsafe. Phase 5.
-- The next task is Phase 4: classify failures and schedule retries with backoff.
+- The next task after this one was failure classification. That is the section below. The scheduler is still not built.
+
+## Task: Failure classification and backoff
+
+### What we built
+
+The worker can now tell a failure that is worth another try from one that is not. `JobFailureClassifier` treats an exception as permanent only when it is bad input: `JsonException`, `ArgumentException` and its subclasses, `FormatException`, and `NotSupportedException`. Every other exception is retryable. A handler can also return `JobHandlerOutcome.RetryableFailure` or `PermanentFailure` without throwing.
+
+`RetryBackoffPolicy` turns the failed attempt number into a wait. `JobProcessor.Apply` calls `Job.RecordRetryableFailure`, which saves `RetryScheduled` and `NextAttemptAt`, or `DeadLettered` with a null `NextAttemptAt` when `AttemptCount` has reached `MaxAttempts`. The consumer still acks. It does not requeue.
+
+`demo.transient-failure` is registered. Its payload is `{ "failTimes": 0-20 }`. It returns a retryable failure while `AttemptNumber` is at most `failTimes`, then success. A bad payload is `InvalidPayload` and the job is `Failed`.
+
+### Why we built it
+
+Until now every handler failure was permanent, and `demo.transient-failure` was rejected with 400. A timeout and a bad payload are not the same kind of problem. Requeueing the RabbitMQ message would retry immediately and hammer a dependency that is already failing.
+
+### How it works
+
+1. `AddTaskFlowApplication` binds `TaskFlow:Retry` to `RetryPolicyOptions` and refuses to start if `BaseDelay` is not positive, `MaxDelay` is below `BaseDelay`, `Multiplier` is not above 1, or `JitterRatio` is outside `[0, 1)`.
+2. The policy is a singleton. Production passes `Random.Shared.NextDouble`. Tests pass a fixed function, so `TestBackoff.Exact` uses jitter 0.
+3. After the handler returns, `JobProcessor.Apply` switches on the outcome:
+   - `Succeeded` calls `CompleteSuccessfully`.
+   - `PermanentFailure` calls `FailPermanently`.
+   - `RetryableFailure` computes `next = completedAt + GetDelay(attempt.AttemptNumber)` and calls `RecordRetryableFailure`.
+4. `GetDelay` for failed attempt `n` is `min(MaxDelay, BaseDelay * Multiplier^(n-1))`, multiplied by a factor in `[1 - JitterRatio, 1 + JitterRatio]`, then capped at `MaxDelay` again. Defaults: base 5s, multiplier 5, max 10 minutes, jitter 0.2. Attempt 1 is about 5s, attempt 2 about 25s, attempt 3 about 125s, attempt 4 would be 625s and is capped at 10 minutes.
+5. If the handler throws, `RunHandlerAsync` stores the type name only, in the message `The handler threw {type}.` The exception text is dropped. `JobFailureClassifier.IsPermanent` chooses `Failed` or the retry path. A cancelled token still propagates.
+6. The save happens, then `RabbitMqJobConsumer` acks. The due job sits in `RetryScheduled` until the scheduler in the next task publishes it.
+
+### Simple analogy
+
+A phone that is busy is not a wrong number. You wait a bit longer each time you redial, and you stop after a few tries. You do not hang up and immediately mash redial, and you do not keep calling a number that does not exist. `NextAttemptAt` is the time you wrote on the pad. Acking is hanging up the current call so the line is free.
+
+### Where is the code?
+
+- `src/TaskFlow.Application/Jobs/RetryPolicyOptions.cs` and `RetryBackoffPolicy.cs`
+- `src/TaskFlow.Application/Jobs/JobFailureClassifier.cs`
+- `src/TaskFlow.Application/Jobs/JobProcessor.cs` (`Apply`, `RunHandlerAsync`)
+- `src/TaskFlow.Application/Jobs/Handlers/DemoHandlers.cs` (`DemoTransientFailureHandler`)
+- `src/TaskFlow.Domain/Jobs/Job.cs` (`RecordRetryableFailure`)
+- `src/TaskFlow.Application/DependencyInjection.cs`
+
+### What happens when it fails?
+
+- A retryable result on attempt 1 of 3: status `RetryScheduled`, `NextAttemptAt` is the completion time plus the delay, attempt outcome `RetryableFailure`. `A_retryable_result_schedules_the_next_attempt` and `A_transient_failure_is_scheduled_instead_of_requeued` (delay between 4 and 6 seconds).
+- The same result when `maxAttempts` is 1: status `DeadLettered`, `NextAttemptAt` null, the attempt still `RetryableFailure`. `A_retryable_result_on_the_last_attempt_dead_letters_the_job`.
+- `InvalidOperationException`: `RetryScheduled`. `JsonException`: `Failed`. Neither stores the exception text. `An_unknown_exception_schedules_a_retry_without_storing_the_exception_message` and `A_permanent_exception_fails_the_job_without_storing_the_exception_message`.
+- `failTimes` outside 0–20, or not a whole number: `Failed` with `InvalidPayload`. The handler never throws for that.
+- A `RetryScheduled` job is not picked up again. That is the missing scheduler, not a bug in this task.
+
+### Why this design?
+
+Unknown exceptions default to retryable because a timeout, a deadlock, and a bug in a handler often clear up, and `MaxAttempts` is the bound. Treating them as permanent would drop work that a second try would finish. The permanent list is the small set that fails the same way every time: the payload cannot be read or the arguments are illegal.
+
+Jitter exists so many jobs that fail together do not all become due at the same instant. The factor is centered on 1, so the average wait stays the exponential value.
+
+The message is acked because the retry is a new publish later. Requeue would deliver it again immediately, which is the storm ADR-005 rejects.
+
+### Alternatives
+
+- Requeue on failure. Rejected: hot loop, and no place to store the growing delay.
+- Treat every exception as permanent. That was the Phase 3 rule. Rejected once retries existed, because a transient outage would dead-end the job.
+- Treat every exception as permanent except a timeout. Rejected: the list of "worth retrying" grows forever. The list of "bad input" stays small.
+- RabbitMQ delayed-message plugin. Rejected in ADR-005. The wait lives in SQL Server, next to the job.
+
+### Tradeoffs
+
+`RetryScheduled` jobs wait forever until the scheduler exists. The API shows `nextAttemptAt`, and nothing acts on it.
+
+Jitter makes the exact delay unknowable in production. Tests inject the random source so they can assert an exact `TimeSpan`.
+
+Dead-lettering keeps the attempt outcome as `RetryableFailure`. The job status says "stop"; the attempt row says "this try failed in a way we would have retried".
+
+### Interview questions
+
+1. When is a failure permanent?
+2. What delay does attempt 4 get with the defaults?
+3. Why is the delay not exactly 5 seconds?
+4. Why ack a job that will run again?
+5. What is the difference between `Failed` and `DeadLettered`?
+6. What does `demo.transient-failure` with `failTimes: 1` do today, end to end?
+
+### Interview answers
+
+1. When the handler returns `PermanentFailure`, or when it throws `JsonException`, `ArgumentException` (including `ArgumentNullException` and `ArgumentOutOfRangeException`), `FormatException`, or `NotSupportedException`. A missing handler is permanent too (`NoHandlerRegistered`). Anything else is retryable until `MaxAttempts`.
+2. `BaseDelay * 5^3` is 625 seconds. `MaxDelay` is 10 minutes, so the wait is 10 minutes before jitter, and jitter cannot push it past 10 minutes. `Delay_stays_within_the_jitter_band_and_never_past_the_cap`.
+3. `JitterRatio` 0.2 multiplies the raw delay by a factor from 0.8 to 1.2. The integration test allows 4 to 6 seconds around the 5-second base. With jitter 0 the delay is exact.
+4. Ack tells RabbitMQ this delivery is finished. The next run is a new message from the scheduler, not this one again. Requeue would ignore `NextAttemptAt`.
+5. `Failed` is a permanent failure. `DeadLettered` is a retryable failure that used up `MaxAttempts`. Both are terminal. Only `DeadLettered` came through `RecordRetryableFailure`.
+6. The API accepts it. The worker runs it, saves `RetryScheduled` with one `RetryableFailure` attempt and a `nextAttemptAt` a few seconds out, and acks so the queue is empty. It does not run the second attempt. The scheduler is not built.
+
+### Things I should remember
+
+- Unknown exception: retry. Bad input: fail. Budget spent: dead-letter.
+- The formula uses the attempt that just failed, starting at 1.
+- Ack, then wait. Do not requeue a job failure.
+- `NextAttemptAt` is stored and unused until the scheduler lands.
+- The next task is that scheduler, with a filtered index on `Status` and `NextAttemptAt`.

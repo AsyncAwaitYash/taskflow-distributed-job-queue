@@ -8,12 +8,13 @@ internal static class TestJobApi
 {
     private static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(30);
 
-    public static async Task<Guid> SubmitAsync(HttpClient client, string type, object payload)
+    public static async Task<Guid> SubmitAsync(HttpClient client, string type, object payload, int? maxAttempts = null)
     {
-        HttpResponseMessage response = await client.PostAsJsonAsync("/api/v1/jobs", new { type, payload });
+        object body = maxAttempts is null ? new { type, payload } : new { type, payload, maxAttempts };
+        HttpResponseMessage response = await client.PostAsJsonAsync("/api/v1/jobs", body);
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
-        JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
-        return body.GetProperty("id").GetGuid();
+        JsonElement created = await response.Content.ReadFromJsonAsync<JsonElement>();
+        return created.GetProperty("id").GetGuid();
     }
 
     public static async Task<JsonElement> GetJobAsync(HttpClient client, Guid jobId)

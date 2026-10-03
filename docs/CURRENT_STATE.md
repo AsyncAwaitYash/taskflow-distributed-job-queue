@@ -1,6 +1,6 @@
 # Current state
 
-- Current phase: **Phase 3 complete**. Phase 4 has not started.
+- Current phase: **Phase 4 in progress**. Task 1 is done. The retry scheduler is not built.
 - Current task: none in progress.
 - Last updated: 2026-10-03
 
@@ -15,17 +15,17 @@
 - Migration `EnableReadCommittedSnapshot`: reads use row versions, which removed a deadlock (SQL error 1205) between `GET /api/v1/jobs/{id}` and a worker writing the same job
 - `dotnet ef database update` now reads `ConnectionStrings__TaskFlow` from the environment
 - Worker launch profiles `worker-1` and `worker-2`
+- Phase 4 task 1: `JobFailureClassifier`, `RetryBackoffPolicy` (`TaskFlow:Retry`, defaults about 5s, 25s, 125s, then 10 minutes, jitter 0.2), and `demo.transient-failure`. A retryable failure is saved as `RetryScheduled` with `NextAttemptAt`, or `DeadLettered` when `AttemptCount` reaches `MaxAttempts`, and the message is acked. Unknown exceptions are retryable. `JsonException`, `ArgumentException`, `FormatException`, and `NotSupportedException` are permanent
 
 ## Pending
 
-- Phase 4: failure classification and backoff (next), the retry scheduler, the manual retry endpoint
+- Phase 4: the retry scheduler (next), then the manual retry endpoint
 - Phases 5–7: conditional claims and crash recovery, observability and Docker Compose, broader failure tests
 - Phase 8 outbox and benchmark: not started, and not allowed yet
 
 ## Known issues
 
-- `demo.transient-failure` is rejected with 400. It needs the Phase 4 retry policy.
-- Any exception from a handler is a permanent failure (`ErrorType` = exception type name). Phase 4 classifies failures.
+- A `RetryScheduled` job is never republished. The scheduler is the next task, so `demo.transient-failure` stops after its first failure even when later attempts would succeed.
 - A worker crash after the claim save leaves the job `Processing`. The redelivery is skipped, so the job is stuck. Phase 5.
 - The claim is a plain save, not a compare-and-update. Two workers holding deliveries for the same `Queued` row at once could both run it. `CompetingConsumersTests` does not exercise that case, because each message goes to one consumer. Phase 5.
 - If SQL Server fails after the claim save, the message is nacked and the redelivery sees `Processing` and is skipped. Same stuck case.
@@ -41,15 +41,12 @@
 
 ## Recent changes
 
-- Added `CompetingConsumersTests` and the shared test helpers `TestWorkerHost` and `TestJobApi`.
-- The integration tests now use a `TaskFlow` database inside the SQL Server container. Before, they wrote the tables into `master`.
-- Added migration `EnableReadCommittedSnapshot` and a test that it is on.
-- Fixed the design-time `DbContext` factory to honor `ConnectionStrings__TaskFlow`.
-- Rewrote `docs/DEMO.md` from an observed run.
+- Added failure classification and exponential backoff with jitter. `demo.transient-failure` is a real handler.
+- The worker now saves `RetryScheduled` or `DeadLettered` and still acks. It does not requeue a failed job.
 
 ## Next task
 
-Phase 4 task 1: classify failures as retryable or permanent, add a configured exponential backoff with jitter policy, and have the worker record `RetryScheduled` with `NextAttemptAt` through `Job.RecordRetryableFailure`, or `DeadLettered` when attempts run out. Add the `demo.transient-failure` handler. Ack after the save; never requeue a failed job. The scheduler that republishes due jobs is Phase 4 task 2, so a `RetryScheduled` job will wait until that task lands.
+Phase 4 task 2: the retry scheduler. Query `RetryScheduled` rows whose `NextAttemptAt` is due, through a filtered index on `Status` and `NextAttemptAt`. Conditionally move each row to `Queued` and publish it. A second pass that updates zero rows does not publish. Do not build the manual retry endpoint in that change.
 
 ## Build status
 
@@ -59,12 +56,15 @@ Succeeded on 2026-10-03 with SDK `10.0.401`.
 
 ## Test status
 
-`dotnet test TaskFlow.slnx`: 91 passed, 0 failed (68 unit, 23 integration). The integration suite passed 5 runs in a row after the snapshot-isolation fix; before it, 2 of 4 runs failed with a deadlock.
+`dotnet test TaskFlow.slnx`: 123 passed, 0 failed (98 unit, 25 integration), run twice.
 
 The integration tests ran in Docker with `mcr.microsoft.com/mssql/server:2022-latest` and `rabbitmq:4.1`.
 
 ## Learning topics introduced
 
+- Retryable versus permanent failures, and why an unknown exception is retryable
+- Exponential backoff with jitter, and why the message is acked instead of requeued
+- Dead-lettering as a job status, with the attempt still recorded as a retryable failure
 - Competing consumers: one message goes to one consumer, and prefetch 1 sends the next one to an idle worker
 - What a two-worker test proves and what it does not (no conditional claim, no crash)
 - Reader/writer deadlocks in SQL Server and `READ_COMMITTED_SNAPSHOT`

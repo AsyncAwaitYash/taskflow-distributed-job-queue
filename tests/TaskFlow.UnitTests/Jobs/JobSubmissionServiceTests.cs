@@ -155,18 +155,17 @@ public sealed class JobSubmissionServiceTests
     }
 
     [Fact]
-    public async Task Submit_rejects_a_type_whose_handler_waits_for_the_retry_policy()
+    public async Task Submit_accepts_the_transient_failure_type()
     {
-        RecordingRepository repository = new();
         RecordingPublisher publisher = new();
-        JobSubmissionService service = CreateService(repository, publisher);
+        JobSubmissionService service = CreateService(new RecordingRepository(), publisher);
 
-        InvalidJobRequestException exception = await Assert.ThrowsAsync<InvalidJobRequestException>(
-            () => service.SubmitAsync(new SubmitJob("demo.transient-failure", "{}", null, null), CancellationToken.None));
+        Job job = await service.SubmitAsync(
+            new SubmitJob("demo.transient-failure", """{"failTimes":2}""", null, null),
+            CancellationToken.None);
 
-        Assert.Contains("type", exception.Errors.Keys);
-        Assert.Empty(repository.Added);
-        Assert.Empty(publisher.Published);
+        Assert.Equal(JobStatus.Queued, job.Status);
+        Assert.Equal("demo.transient-failure", Assert.Single(publisher.Published).Type);
     }
 
     private static JobSubmissionService CreateService(RecordingRepository repository, RecordingPublisher publisher)

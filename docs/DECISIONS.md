@@ -40,9 +40,9 @@ These ADRs record choices that are already made. The implementation status says 
 
 ## ADR-005: Retry policy with exponential backoff and jitter
 
-- Status: Accepted. Implementation: not started (Phase 4).
+- Status: Accepted. Implementation: the classifier and the delay are done (Phase 4 task 1). `JobFailureClassifier`, `RetryBackoffPolicy`. The scheduler that publishes a job when `NextAttemptAt` arrives is not built yet.
 - Context: Immediate requeue storms a failing dependency. A fixed delay synchronizes every worker.
-- Decision: A configurable policy classifies failures. Retryable failures use exponential backoff with jitter. The illustrative schedule is immediate, ~5s, ~30s, ~2m, ~10m, then dead-letter. Those numbers are configuration, not constants buried in the handler.
+- Decision: Retryable failures wait `min(MaxDelay, BaseDelay * Multiplier^(attempt-1))`, then multiplied by a random factor in `[1 - JitterRatio, 1 + JitterRatio]` and capped at `MaxDelay` again. Defaults (`TaskFlow:Retry`): base 5s, multiplier 5, max 10m, jitter 0.2, so the waits are about 5s, 25s, 125s, then 10m. An exception is retryable unless it is bad input: `JsonException`, `ArgumentException` (and subclasses), `FormatException`, `NotSupportedException`. A handler can also return a retryable or permanent result directly. The attempt budget still ends in `DeadLettered`. The message is acked; nothing requeues a failed job.
 - Alternatives: Infinite requeue. Fixed delay. RabbitMQ's delayed-message plugin. Dead-letter on the first failure.
 - Tradeoffs: Backoff adds a scheduler and a `NextAttemptAt` column. It protects downstream systems. Jitter adds a little randomness so retries do not align.
 - Consequences: Permanent failures do not use this schedule. They go to `Failed`. Exhausted retryable failures go to `DeadLettered`.
@@ -80,8 +80,8 @@ These ADRs record choices that are already made. The implementation status says 
 - Context: The worker receives a job id that may be new, a redelivery, a duplicate, or garbage, and SQL Server may be down. Each case needs a settle call that neither loses work nor loops forever.
 - Decision:
   - The row decides, not the message. `Pending` is promoted with `MarkQueued`, because a delivered message proves the publish happened. `Queued` is claimed and run. Every other status is acked without running the handler.
-  - The handler's result decides the saved status (`Succeeded` or `Failed`). The message is acked after that save.
-  - Until Phase 4, a handler exception is a permanent failure, recorded with the exception type name and not the message text.
+  - The handler's result decides the saved status: `Succeeded`, `Failed`, `RetryScheduled`, or `DeadLettered` (ADR-005). The message is acked after that save. A retry is a later publish, not a requeue.
+  - A handler exception is classified by `JobFailureClassifier`. The stored error is the exception type name, never the message text.
   - An unreadable body is rejected without requeue.
   - A SQL Server outage is nacked with requeue after `DatabaseRetryDelay`. That rate-limited requeue is for infrastructure outages only, not for job failures, and it is not the retry policy.
   - Any other unexpected processing error is rejected without requeue and logged.
@@ -94,7 +94,7 @@ These ADRs record choices that are already made. The implementation status says 
 - Tradeoffs:
   - During a SQL outage, every worker requeues once per `DatabaseRetryDelay`. That is noisy but bounded.
   - A crash after the claim leaves a `Processing` row that later deliveries skip, so the job is stuck until Phase 5.
-  - Treating every exception as permanent is wrong for transient errors until Phase 4.
+  - Phase 4 task 1 replaced "every exception is permanent" with `JobFailureClassifier`. Bad input is still `Failed`. Other exceptions are retryable until the attempt budget is spent.
 - Consequences: The ack has one site. A job does not run for a delivery whose row says it is already running or finished. Phase 5 replaces the plain claim save with a compare-and-update and adds recovery for stuck `Processing` rows.
 
 ## ADR-010: Read committed snapshot isolation

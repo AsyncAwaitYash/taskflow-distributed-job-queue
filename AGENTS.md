@@ -50,4 +50,4 @@ Generated code is not evidence. Build and test results are.
 
 Report what changed, what the user should learn, the build and test result, and the next task.
 
-Phase 3 is complete. The next task is Phase 4 task 1: classify failures as retryable or permanent, add a configured exponential backoff with jitter policy, and have the worker record `RetryScheduled` with `NextAttemptAt` through `Job.RecordRetryableFailure` (or `DeadLettered` when attempts run out). Add the `demo.transient-failure` handler. Ack the message after that save; do not requeue. Do not build the scheduler that republishes due jobs, the retry endpoint, or the Phase 5 conditional claim in that change.
+The next task is Phase 4 task 2: the retry scheduler. It finds `RetryScheduled` jobs whose `NextAttemptAt` has passed, using a filtered index on `Status` and `NextAttemptAt`, conditionally moves each one to `Queued`, and publishes it. A second pass that updates zero rows does not publish. Do not build the manual retry endpoint or the Phase 5 conditional claim in that change.

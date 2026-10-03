@@ -6,7 +6,7 @@ Answers below are split into **today** (what the code does) and **target** (the 
 
 ### Today (30–60 seconds)
 
-TaskFlow is a learning project I am building: a background job queue. The API will accept a job, store it in SQL Server, and publish a small message to RabbitMQ. A separate worker will do the work, ack the message only after the result is saved, and retry failures with backoff. The projects compile, the dependency direction is tested, and `GET /` says job processing is off. The job lifecycle does exist in memory: a `Job` moves through a fixed set of statuses, and an attempt is a separate object. I have not built the queue or the database yet. I wrote the design down first so the failure cases (crash before ack, duplicate delivery, publish after the database commit) are explicit before the code hides them.
+TaskFlow stores each job in SQL Server, publishes the job id to RabbitMQ, and marks the row `Queued` only after the broker confirms. A separate worker runs the handler and acks after the outcome is saved. A retryable failure becomes `RetryScheduled` with exponential backoff and jitter, or `DeadLettered` when the attempts run out. The message is acked either way. Nothing republishes a due retry yet. Two workers can share the queue. I do not call this exactly-once.
 
 ### Target, not earned yet (about 60 seconds)
 
@@ -18,7 +18,7 @@ The API is the front door. It writes the job to SQL Server, which is the system 
 
 ### Why a queue?
 
-- Short answer (today): So the HTTP request can return without doing the slow work. The API stores the job and publishes its id to RabbitMQ. No worker consumes it yet.
+- Short answer (today): So the HTTP request can return without doing the slow work. The API stores the job and publishes its id to RabbitMQ. A separate worker consumes it.
 - TaskFlow example: `POST /api/v1/jobs` returns 201 `Queued` after the broker confirms. `JobPublishingTests` reads the message off `taskflow.jobs.process`.
 - Follow-up: Why not a background thread in the API?
 - Deeper answer: A thread inside the API dies with the API process, does not give you competing consumers, and has no ack. A separate worker plus a durable queue keeps the work after the process is gone. Cost: two stores that can briefly disagree.
@@ -86,8 +86,8 @@ The API is the front door. It writes the job to SQL Server, which is the system 
 
 ### What does ack mean?
 
-- Short answer (today): The worker acks after `JobProcessor` has saved `Succeeded` or `Failed`. `WorkerTests` checks the queue is empty afterwards.
-- Detail: Ack tells the broker the message can be deleted. We ack after the database has the outcome. Ack is not the same word as "the handler succeeded": a permanent failure is also acked, after the job is `Failed` or `DeadLettered`, so the poison message does not spin.
+- Short answer (today): The worker acks after `JobProcessor` has saved `Succeeded`, `Failed`, `RetryScheduled`, or `DeadLettered`. `WorkerTests` checks the queue is empty afterwards.
+- Detail: Ack tells the broker the message can be deleted. We ack after the database has the outcome. Ack is not the same word as "the handler succeeded": a permanent failure and a scheduled retry are also acked, so the message does not spin.
 
 ### How do two workers share the work?
 
@@ -106,14 +106,14 @@ The API is the front door. It writes the job to SQL Server, which is the system 
 
 ### What is at-least-once?
 
-- Short answer: The message is delivered one or more times, never "guaranteed once". TaskFlow has accepted that model in ADR-004 and has not implemented it.
+- Short answer: The message is delivered one or more times, never "guaranteed once". TaskFlow acks after the save and skips a delivery whose row is no longer `Queued`. That is at-least-once. It is not exactly-once. The conditional claim is still Phase 5.
 - Follow-up: What would exactly-once require?
 - Deeper answer: An atomic side effect and consume, which this stack does not have. An outbox plus idempotent handlers is the practical version, and it is still at-least-once with duplicates suppressed.
 
 ### How do retries work? Why backoff and jitter?
 
-- Short answer (today): They do not run.
-- Target: Retryable errors schedule `NextAttemptAt`. The delay grows. Jitter spreads workers that failed together so they do not stampede the dependency. Permanent errors skip the schedule.
+- Short answer (today): A retryable failure is saved as `RetryScheduled` with `NextAttemptAt` from `RetryBackoffPolicy`. Defaults are about 5s, 25s, 125s, then 10 minutes, each jittered by 20 percent. The message is acked. An unknown exception is retryable. `JsonException`, `ArgumentException`, `FormatException`, and `NotSupportedException` are permanent and become `Failed`. When `AttemptCount` reaches `MaxAttempts` the job is `DeadLettered`. The scheduler that publishes a due job is not built, so the job waits.
+- Target: that scheduler, then the manual retry endpoint.
 - Follow-up: Why is immediate requeue dangerous?
 - Deeper answer: A down dependency gets the full arrival rate again, immediately, from every worker. That is a retry storm.
 
@@ -127,7 +127,7 @@ The API is the front door. It writes the job to SQL Server, which is the system 
 
 ### What do the tests prove?
 
-- Short answer: The layer graph, the API skeleton, and the in-memory job state machine. They do not prove a queue.
+- Short answer: The layer graph, the state machine, publish-then-`Queued`, classification, and backoff bounds. Integration tests against SQL Server and RabbitMQ prove consume, competing consumers, `RetryScheduled`, and `DeadLettered`.
 - TaskFlow example: `ProjectLayoutTests`, `ApiSkeletonTests`, `JobLifecycleTests`.
 - Follow-up: Where will the race tests live?
 - Deeper answer: Integration tests against real SQL Server and RabbitMQ (Testcontainers), Phase 5. Not against an in-memory fake of RabbitMQ.

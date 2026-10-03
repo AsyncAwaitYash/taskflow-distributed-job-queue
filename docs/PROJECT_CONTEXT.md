@@ -50,4 +50,4 @@ Client
                  -> SQL Server (terminal or retry state)
 ```
 
-A second worker competes for the same queue. That behavior is not implemented.
+A second worker competes for the same queue. `CompetingConsumersTests` and `docs/DEMO.md` show that.
