@@ -26,10 +26,36 @@ public sealed class ApiSkeletonTests : IClassFixture<WebApplicationFactory<Progr
 
         JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("TaskFlow", body.GetProperty("name").GetString());
-        Assert.Equal("skeleton", body.GetProperty("status").GetString());
-        Assert.Equal(0, body.GetProperty("phase").GetInt32());
+        Assert.Equal("running", body.GetProperty("status").GetString());
+        Assert.Equal(2, body.GetProperty("phase").GetInt32());
         Assert.False(body.GetProperty("jobProcessing").GetBoolean());
+        Assert.False(body.GetProperty("databaseConfigured").GetBoolean());
         Assert.Contains("not implemented", body.GetProperty("message").GetString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Swagger_document_lists_the_job_routes()
+    {
+        HttpClient client = _factory.CreateClient();
+
+        HttpResponseMessage response = await client.GetAsync("/swagger/v1/swagger.json");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        JsonElement document = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(document.GetProperty("paths").TryGetProperty("/api/v1/jobs", out _));
+        Assert.True(document.GetProperty("paths").TryGetProperty("/api/v1/jobs/{id}", out _));
+    }
+
+    [Fact]
+    public async Task Job_routes_report_that_sql_server_is_not_configured()
+    {
+        HttpClient client = _factory.CreateClient();
+
+        HttpResponseMessage response = await client.GetAsync("/api/v1/jobs");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("SQL Server is not configured.", body.GetProperty("title").GetString());
     }
 
     [Fact]

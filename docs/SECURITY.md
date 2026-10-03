@@ -5,8 +5,8 @@ This is a local learning project. It is not safe to expose on the public interne
 ## In place now
 
 - No secrets in the repository. `.env.example` has placeholders. `.gitignore` ignores `.env` and `.env.*`.
-- The skeleton reads no connection string and no password.
-- The skeleton logs no payload, because it has no payload.
+- The job API reads `ConnectionStrings:TaskFlow` from configuration. No password is committed. `.env.example` has placeholders.
+- Create and query logs include the job id, type, status, and correlation id. They do not include the payload. EF command logging is Warning so SQL parameter values stay out of the default log.
 - `Directory.Packages.props` pins package versions so a restore does not float to a surprise build.
 
 ## By design, not built

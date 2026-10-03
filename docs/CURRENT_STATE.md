@@ -1,40 +1,43 @@
 # Current state
 
-- Current phase: **Phase 0 complete**. Phase 1 has not started.
+- Current phase: **Phase 2 complete**. Phase 3 has not started.
 - Current task: none in progress.
 - Last updated: 2026-10-03
 
 ## Completed
 
-- .NET 10 solution (`TaskFlow.slnx`) with Api, Application, Domain, Infrastructure, Worker, unit tests, and integration tests
-- Project references match the dependency rules. Unit tests lock that graph
-- `GET /` returns a phase 0 skeleton document. Job routes are absent
-- Worker process starts, logs that job processing is disabled, and stops cleanly on cancellation
-- Project memory: `AGENTS.md`, `.cursor/rules`, and the `docs/` set
-- Central package versions in `Directory.Packages.props`. No RabbitMQ, EF Core, or Serilog packages yet
+- Phase 0 solution skeleton and Phase 1 in-memory state machine
+- EF Core mapping and migration `InitialJobSchema` for `Jobs` and `JobAttempts`
+- `POST /api/v1/jobs`, `GET /api/v1/jobs`, `GET /api/v1/jobs/{id}`
+- Swagger at `/swagger` and Problem Details for 400, 404, and 503
+- New jobs stay `Pending`. RabbitMQ is not called
+- Testcontainers SQL Server coverage for create, list, get, and attempt round-trip
 
 ## Pending
 
-- Phase 1 domain model and state machine (next)
-- Phases 2–7: API, SQL Server, RabbitMQ, retries, idempotency, observability, Docker, broader tests
+- Phase 3: RabbitMQ topology, publisher, then the consuming worker (next task is the publisher only)
+- Phases 4–7: retry policy, idempotent claims, observability, Docker Compose, broader failure tests
 - Phase 8 outbox and benchmark: not started, and not allowed yet
 
 ## Known issues
 
-- `GET /` is a temporary probe so the skeleton can be run. It is not `/health/live` and not the job API. Remove or replace it when real endpoints exist.
-- Assembly marker types (`DomainAssembly`, `ApplicationAssembly`, `InfrastructureAssembly`) exist so the empty layers still compile and the reference graph is testable. Delete them when real types make the references obvious.
-- The design docs describe target behavior. None of that behavior runs yet. Do not demo it as if it does.
-- RabbitMQ client version is not locked. On 2026-10-03 the newest stable `RabbitMQ.Client` on NuGet was 7.2.2. Re-check before Phase 3.
-- Docker Compose does not exist. `.env.example` is documentation only; the apps do not read it.
+- A stored job is not queued. Restarting the API does not publish `Pending` rows.
+- `RetryManually` still does not increase `MaxAttempts`. The HTTP retry route does not exist.
+- The backoff delay is still an argument. No policy calculates it.
+- `GET /` is a status probe, not `/health/live`.
+- Assembly marker types remain for the layout test.
+- RabbitMQ client version is not locked. On 2026-10-03 the newest stable `RabbitMQ.Client` on NuGet was 7.2.2. Re-check before adding the package.
+- Docker Compose does not exist. Integration tests start their own SQL Server container.
 
 ## Recent changes
 
-- Initialized the Phase 0 skeleton and wrote the design and learning docs.
-- Verified the build, the test suite, a live `GET /`, and a short worker run.
+- Added the job HTTP API and the SQL Server migration.
+- Kept created jobs at `Pending` so the response does not claim a publish happened.
+- Proved the mapping with Testcontainers against SQL Server 2022.
 
 ## Next task
 
-Implement the `Job` and `JobAttempt` domain model and the legal status transitions, with unit tests. Do not add EF Core, migrations, or HTTP endpoints in that change.
+Add the RabbitMQ exchange, queue, and publisher. After a successful publish, call `Job.MarkQueued`. If the publish fails, leave the row `Pending` and return an error. Do not consume messages in that change.
 
 ## Build status
 
@@ -44,18 +47,14 @@ Succeeded on 2026-10-03 with SDK `10.0.401`.
 
 ## Test status
 
-`dotnet test TaskFlow.slnx`: 5 passed, 0 failed (3 unit, 2 integration).
+`dotnet test TaskFlow.slnx`: 55 passed, 0 failed (44 unit, 11 integration).
 
-Smoke run:
-
-- `GET http://127.0.0.1:8080/` returned the skeleton JSON (`jobProcessing: false`)
-- `GET /api/v1/jobs` returned 404
-- `GET /health/live` returned 404
-- The worker logged `JobProcessingEnabled=False` and logged a clean stop when cancelled
+The SQL Server tests ran in Docker with `mcr.microsoft.com/mssql/server:2022-latest`. Without a connection string, `GET /api/v1/jobs` returns 503.
 
 ## Learning topics introduced
 
-- What TaskFlow is for (planned product, skeleton only)
-- Asynchronous processing, queues, and RabbitMQ at a high level, labeled planned
-- Layered projects and why the dependency direction exists (implemented)
-- The repository, not chat history, holds the project memory (implemented)
+- A row is the system of record, and `Pending` is not `Queued`
+- EF Core mapping of get-only domain properties
+- Problem Details for invalid input and a missing database
+- Testcontainers as a real SQL Server, not an in-memory substitute
+- Job versus attempt, and the state machine, from Phase 1

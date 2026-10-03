@@ -4,8 +4,8 @@
 
 | Project | What it proves |
 | --- | --- |
-| `tests/TaskFlow.UnitTests` | Domain has no TaskFlow dependencies. Application references Domain only. Infrastructure references Application and Domain only. |
-| `tests/TaskFlow.IntegrationTests` | The API host starts. `GET /` returns the phase 0 skeleton. The API assembly references Application and Infrastructure. |
+| `tests/TaskFlow.UnitTests` | Domain has no TaskFlow dependencies. Application references Domain only. Infrastructure references Application and Domain only. `Job` accepts only the legal status graph: success, retry scheduling, permanent failure, exhausted attempts, manual retry, and rejected or out-of-order calls leave the job unchanged. |
+| `tests/TaskFlow.IntegrationTests` | Without a connection string, `GET /` reports phase 2 and job routes return 503. Swagger lists the job paths. With Testcontainers SQL Server, create/list/get persist a `Pending` job, filters work, and a completed attempt round-trips. |
 
 Command:
 
@@ -15,9 +15,9 @@ dotnet test TaskFlow.slnx
 
 `scripts/verify.sh` builds, then tests.
 
-On 2026-10-03 with SDK 10.0.401: build 0 warnings, 5 tests passed.
+On 2026-10-03 with SDK 10.0.401: build 0 warnings, 55 tests passed (44 unit, 11 integration).
 
-There are no Testcontainers yet. Nothing in the suite talks to SQL Server or RabbitMQ, because those integrations do not exist. Do not add a fake broker so a test can go green.
+SQL Server tests use Testcontainers (`mcr.microsoft.com/mssql/server:2022-latest`) and require Docker. RabbitMQ is still absent. Do not add a fake broker so a test can go green.
 
 ## What later phases add
 

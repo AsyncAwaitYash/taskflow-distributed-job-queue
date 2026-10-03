@@ -50,4 +50,4 @@ Generated code is not evidence. Build and test results are.
 
 Report what changed, what the user should learn, the build and test result, and the next task.
 
-The next task after Phase 0 is Phase 1: the `Job` and `JobAttempt` domain model and the legal state transitions, with unit tests. Do not add EF Core or the HTTP API in that task.
+The next task is the RabbitMQ topology and publisher. After a successful publish, move the job from `Pending` to `Queued` through `Job.MarkQueued`. Do not consume messages in that change. If the publish fails, leave the row `Pending` and do not report it as queued.

@@ -4,7 +4,7 @@ This is the textbook for the repository. If a sentence describes behavior, the c
 
 ## What is TaskFlow?
 
-**Status: planned product. Phase 0 skeleton only.**
+**Status: jobs can be stored in SQL Server. The queue and the worker are not connected, so a new job stays Pending.**
 
 TaskFlow will be a small background-job system. A client will ask an API to do something that should not block the HTTP call, such as "send this email" or "generate this report". The API will remember the job. A worker process, running separately, will do it later.
 
@@ -15,7 +15,7 @@ You are building it to learn two ideas well enough to explain in an interview:
 
 It is not a SaaS product. Swagger will be the UI. There is no React app.
 
-Today the API starts and `GET /` says job processing is off. The worker starts and waits. No job can be submitted.
+Today `POST /api/v1/jobs` inserts a row when SQL Server is configured. The status is `Pending` because nothing publishes to RabbitMQ. The worker still waits and does not consume. You can also walk a `Job` through later statuses in a unit test; the API does not do that yet.
 
 ## The picture we are building (planned)
 
@@ -80,9 +80,9 @@ The .NET client is not referenced yet. On 2026-10-03 the newest stable `RabbitMQ
 
 | Phase | You will be able to point at code and say |
 | --- | --- |
-| 0 (now) | How the solution is cut into layers, and why the docs are part of the project |
-| 1 | What a job is, what an attempt is, and which status changes are legal |
-| 2 | How an HTTP request becomes a row |
+| 0 (done) | How the solution is cut into layers, and why the docs are part of the project |
+| 1 (done) | What a job is, what an attempt is, and which status changes are legal |
+| 2 (done) | How an HTTP request becomes a row |
 | 3 | How a message is published, consumed, and acknowledged |
 | 4 | How retries, backoff, jitter, and dead-lettering differ |
 | 5 | Why a duplicate message is normal, and how a claim prevents two workers from both running one job |
@@ -100,7 +100,8 @@ The .NET client is not referenced yet. On 2026-10-03 the newest stable `RabbitMQ
 | Dependency injection | Implemented, narrowly | `TaskFlow.Worker/Program.cs` registers `Worker` |
 | Structured log placeholders | Implemented, narrowly | The skeleton log lines. Serilog is not installed |
 | Asynchronous processing | Designed | This guide, ADR-001 |
-| Background jobs | Designed | ADR-001, `API_CONTRACT.md` |
+| Background jobs | Stored, not queued | `POST /api/v1/jobs` inserts `Pending`. No broker yet |
+| Job state machine | Implemented | `JobTransitions`, `JobLifecycleTests` |
 | Message queues | Designed | ADR-002 |
 | RabbitMQ | Designed | ADR-002, `ARCHITECTURE.md` |
 | Producer | Designed | The API, later |
@@ -127,7 +128,7 @@ The .NET client is not referenced yet. On 2026-10-03 the newest stable `RabbitMQ
 
 ## Common confusions
 
-These use TaskFlow's design. You cannot watch them happen yet.
+Job versus attempt is now visible in `JobLifecycleTests`. The queue and the worker are still design-only, so the rest of these confusions are not runnable yet.
 
 ### Job vs message
 
@@ -135,7 +136,7 @@ A job is the row you care about: type, payload, status. A message is the broker'
 
 ### Job vs attempt
 
-A job is the piece of work. An attempt is one try. `demo.transient-failure` is one job with several attempts. `JobAttempts` is how you will prove that.
+A job is the piece of work. An attempt is one try. `JobLifecycleTests.Retryable_failure_schedules_the_next_try_then_succeeds` builds one job with two attempts. The table that will store them does not exist yet.
 
 ### Queue vs database
 
@@ -370,3 +371,253 @@ Top-level statements generate a `Program` class that is not public. `WebApplicat
 - Domain does not reference Infrastructure.
 - The next code to write is the job and its legal status changes, with unit tests.
 - Do not put this project on a resume until a later phase earns the bullet.
+
+## Task: Phase 1 — Job, attempt, and the state machine
+
+### What we built
+
+An in-memory job. `Job.Create` starts it at `Pending`. The only way to change `Status` is a method on `Job`. Those methods consult `JobTransitions`. A forbidden pair throws `InvalidJobTransitionException` and leaves the object as it was.
+
+`JobAttempt` is one try: a number, a worker id, a start, and later an outcome and a duration. The job keeps the list.
+
+### Why we built it
+
+The queue, the database, and the HTTP API will all ask the same question: "is this status change allowed?" If that answer lives in a controller or a SQL `UPDATE`, it will be copied wrong. One aggregate answers it before any of those exist.
+
+### How it works
+
+1. `Create` checks the type, the payload, and `maxAttempts >= 1`. A missing correlation id is generated. Status is `Pending`. Attempt count is 0.
+2. `MarkQueued` moves `Pending` or `RetryScheduled` to `Queued` and clears `NextAttemptAt`.
+3. `StartProcessing` is legal only from `Queued`. It increments `AttemptCount` and appends an open attempt.
+4. `CompleteSuccessfully` closes that attempt and sets `Succeeded`.
+5. `FailPermanently` closes it and sets `Failed`. No `NextAttemptAt`.
+6. `RecordRetryableFailure` closes it as `RetryableFailure`. If `AttemptCount < MaxAttempts`, status becomes `RetryScheduled` and the caller-supplied `nextAttemptAt` is stored. If the budget is spent, status becomes `DeadLettered` and `NextAttemptAt` stays null.
+7. `DeadLetter` is only for a job already in `RetryScheduled`. It does not add an attempt.
+8. `RetryManually` moves `Failed` or `DeadLettered` back to `Queued`. The attempt count and the budget stay the same.
+
+`MarkQueued` will not republish a failed job, and `RetryManually` will not publish a pending one. Both end at `Queued`, but they are different decisions.
+
+### Simple analogy
+
+The job is a claim ticket. Each attempt is a stamp on the back. The ticket can say "try again Tuesday" (`RetryScheduled`) or "we are done" (`Succeeded`, `Failed`, `DeadLettered`). You cannot stamp "done" onto a ticket that is still in the inbox, and you cannot scratch "done" off a successful ticket.
+
+### Important concepts learned
+
+- A job and an attempt are different objects. One job, many attempts, one open attempt at a time.
+- Dead-lettering is a job status. The last attempt is still a `RetryableFailure`.
+- The state machine does not know about RabbitMQ. Redelivery will later ask this object what to do. It does not do the asking yet.
+- Time is an argument. The domain does not call `DateTime.UtcNow`, so the tests choose the clock.
+
+### Important code locations
+
+| File | What it does |
+| --- | --- |
+| `src/TaskFlow.Domain/Jobs/Job.cs` | Aggregate. Create and every status change. |
+| `src/TaskFlow.Domain/Jobs/JobAttempt.cs` | One try. Only `Job` can complete it. |
+| `src/TaskFlow.Domain/Jobs/JobTransitions.cs` | The allowed pairs. |
+| `src/TaskFlow.Domain/Jobs/JobStatus.cs` | The seven statuses. |
+| `src/TaskFlow.Domain/Jobs/JobAttemptOutcome.cs` | Succeeded, retryable failure, permanent failure. |
+| `src/TaskFlow.Domain/Jobs/InvalidJobTransitionException.cs` | Names the `From` and `To` that were rejected. |
+| `tests/TaskFlow.UnitTests/Jobs/JobLifecycleTests.cs` | Walks the real methods. |
+| `tests/TaskFlow.UnitTests/Jobs/JobTransitionMapTests.cs` | Checks every enum pair against the legal list. |
+
+### Database impact
+
+None yet. The properties match the planned `Jobs` and `JobAttempts` columns in `docs/DATABASE.md`. There is no `DbContext` and no migration. Restarting the test process forgets the objects, which is what an in-memory model does.
+
+### Messaging impact
+
+None. Nothing is published. `NextAttemptAt` is a timestamp on the object, not a delayed RabbitMQ message.
+
+### Failure scenarios
+
+- Calling `StartProcessing` on a `Succeeded` job throws and does not add an attempt. That is the rule a later worker will use when a message is redelivered for a finished job. The worker is not written, so this is not yet a broker test.
+- A retryable failure with no `nextAttemptAt`, or a time earlier than the failure, throws before the attempt is closed. The job stays `Processing`.
+- A clock that moves backwards throws `ArgumentOutOfRangeException` and does not change status.
+- Permanent failure ignores the remaining budget. One bad payload does not get four more tries.
+- Spending the last attempt on a retryable error dead-letters. Passing a future `nextAttemptAt` does not save it.
+
+### Why this design?
+
+Methods on the aggregate beat a public `Status` setter. A setter would let a test, and later a controller, jump from `Pending` to `Succeeded`.
+
+The backoff numbers are not in this type. Phase 4 owns the policy. The domain only insists that a scheduled retry has a time, and that an exhausted budget does not get one.
+
+Manual retry does not refill `MaxAttempts`. That is a small, explicit choice. The alternative is silently giving the caller another full budget. Phase 4 can change it when the HTTP retry endpoint is real. Until then the tests document the stricter behavior.
+
+### Alternatives
+
+- Store status as a string and check it in the API. Rejected: the rule would be repeated in the worker.
+- Put the transition table in Infrastructure next to EF. Rejected: Domain would not be testable without a database, and this phase is not allowed to take that dependency.
+- Compute the 5s / 30s / 2m delays inside `RecordRetryableFailure`. Rejected: those numbers are configuration, and hard-coding them now hides the policy.
+- Reset `AttemptCount` on manual retry. Rejected: the attempt rows would disagree with the counter. History stays. The budget stays.
+
+### Tradeoffs
+
+You can explain the lifecycle without Docker. You still cannot submit a job over HTTP or survive a restart. `Failed` and `DeadLettered` look terminal to a worker, but `RetryManually` can leave them. "Terminal" in an interview has to include that sentence.
+
+A job at its budget that is manually queued will dead-letter on the next retryable failure. That may surprise you in the Phase 4 demo. It is written down here so it is not a surprise.
+
+### Interview questions
+
+1. What is the difference between a job and an attempt?
+2. Which statuses can reach `Queued`, and why are there two methods?
+3. Why is dead-letter not an attempt outcome?
+4. What happens on the attempt that hits `MaxAttempts`?
+5. Why doesn't this project call the database yet?
+
+### Interview answers
+
+1. The job is the work item: type, payload, status, budget. An attempt is one execution of it, with its own start, worker, outcome, and duration. `JobLifecycleTests` shows a job with two attempts and one final `Succeeded`.
+2. `Pending` and `RetryScheduled` use `MarkQueued`, which is the publisher's move. `Failed` and `DeadLettered` use `RetryManually`, which is a human putting the job back. `Succeeded` cannot reach `Queued`.
+3. The attempt records why that try ended: success, retryable, or permanent. Dead-letter is the job's decision after the retryable tries run out. The last attempt stays `RetryableFailure`.
+4. `RecordRetryableFailure` sees `AttemptCount >= MaxAttempts`, sets `DeadLettered`, and stores no `NextAttemptAt`. A `maxAttempts` of 1 does this on the first retryable failure.
+5. The rules are easier to test without SQL Server, and a wrong rule is cheaper to fix before the migration exists. Phase 2 is the persistence step. This object is not a database.
+
+### Deep dive
+
+#### Why the transition map and the methods both exist
+
+`JobTransitions` answers "is this pair legal?" `Job` answers "who is allowed to ask?" `Failed -> Queued` is legal, and `Pending -> Queued` is legal, but they are not the same operation. `MarkQueued` refuses a failed job. `RetryManually` refuses a pending job. The map test iterates every enum pair so a new status cannot silently become reachable. The lifecycle tests call the methods, so a map that says yes while a method forgets to check still fails.
+
+#### Clocks and partial updates
+
+Every method validates, then changes fields. `RecordRetryableFailure` checks the next time before it completes the attempt. If the time is missing, the attempt stays open and the status stays `Processing`. That matters later: a worker that fails validation must not ack a message for a job it left half-updated. There is no message yet. The habit starts here.
+
+`EnsureClock` rejects a timestamp older than `UpdatedAt`. Tests pass the time in. Production code will pass `TimeProvider` or `DateTimeOffset.UtcNow` from the application layer, not from inside `Job`.
+
+### Things I should remember
+
+- Status changes go through `Job`. There is no public setter.
+- One job, many attempts. Dead-letter is a job status.
+- The retry delay is chosen by the caller. This phase does not implement backoff.
+- Manual retry does not refill the attempt budget.
+- None of this is saved. The next task is EF Core and the three job HTTP endpoints, still without RabbitMQ.
+- `GET /` still says job processing is off. That is still true.
+
+## Task: Phase 2 — Store the job in SQL Server
+
+### What we built
+
+`POST /api/v1/jobs` validates the body and inserts a `Job` row. `GET /api/v1/jobs/{id}` reads that row and its attempts. `GET /api/v1/jobs` lists rows, newest first, with page, page size, status, type, and a created-time window. Swagger is at `/swagger`. Errors use Problem Details.
+
+A new job is `Pending`. It is not `Queued`. RabbitMQ is not called.
+
+If `ConnectionStrings:TaskFlow` is missing, those routes return 503 and `GET /` still works.
+
+### Why we built it
+
+The state machine needed a system of record before a queue. The HTTP call should return an id for a row that survives a process restart. Calling the status `Queued` before a broker exists would be a lie the later worker would trust.
+
+### How it works
+
+1. The API reads `type`, `payload`, optional `maxAttempts`, and optional `correlationId`.
+2. `JobSubmissionService` rejects an unknown type, a payload that is not a JSON object, and an attempt budget outside 1–20. The default budget is 5.
+3. `Job.Create` builds a `Pending` job. The clock comes from `TimeProvider`, not from inside the entity.
+4. `JobRepository` adds it and calls `SaveChanges`. That is one SQL transaction. There is no second step that publishes.
+5. The response is 201, a `Location` header, and the stored job. `status` is `Pending`.
+6. List and get run through `JobQueryService`. Get includes attempts ordered by number. List does not load attempts.
+
+`dotnet ef database update` applies migration `InitialJobSchema`. Tests apply that same migration to a SQL Server 2022 container.
+
+### Simple analogy
+
+The API writes the order into the book and hands you the ticket number. It does not put a slip on the kitchen rail. The kitchen (RabbitMQ and the worker) is not open yet, so the ticket says "written down", not "being cooked".
+
+### Important concepts learned
+
+- The database row is the job. The HTTP response is a copy of that row at one moment.
+- `Pending` and `Queued` are different. `Queued` means a publisher has handed the id to the broker. That publisher does not exist yet.
+- EF Core maps the domain types. The domain project still does not reference EF.
+- Integration tests can use a real SQL Server without you installing one, by starting a container. That is Testcontainers.
+
+### Important code locations
+
+| File | What it does |
+| --- | --- |
+| `src/TaskFlow.Application/Jobs/JobSubmissionService.cs` | Validates and creates the `Pending` job. |
+| `src/TaskFlow.Application/Jobs/JobQueryService.cs` | Checks page and date bounds, then queries. |
+| `src/TaskFlow.Application/Jobs/KnownJobTypes.cs` | The allow-list until handlers exist. |
+| `src/TaskFlow.Infrastructure/Persistence/TaskFlowDbContext.cs` | The EF model. |
+| `src/TaskFlow.Infrastructure/Persistence/JobConfiguration.cs` | Table, checks, and the three list indexes. |
+| `src/TaskFlow.Infrastructure/Persistence/JobRepository.cs` | Insert, get, and list. SQL failures become `JobDatabaseUnavailableException`. |
+| `src/TaskFlow.Infrastructure/Persistence/Migrations/20261003120503_InitialJobSchema.cs` | The migration that was applied in tests. |
+| `src/TaskFlow.Api/Jobs/JobEndpoints.cs` | The three routes. No payload is logged. |
+| `tests/TaskFlow.IntegrationTests/JobApiTests.cs` | Create, filter, page, and not-found against SQL Server. |
+| `tests/TaskFlow.IntegrationTests/JobPersistenceTests.cs` | A succeeded attempt survives a new `DbContext`. |
+
+### Database impact
+
+Tables `Jobs` and `JobAttempts`. Status and attempt outcome are ints, matching the enums. `Duration` is ticks in a `bigint`. Checks: `MaxAttempts >= 1`, status 0–6, outcome null or 0–2. Unique `(JobId, AttemptNumber)`. Cascade delete from job to attempts. Indexes for the list query only.
+
+Creating a job is one `SaveChanges`. Publishing is not in that transaction, because publishing does not happen.
+
+### Messaging impact
+
+None. A crash after the insert loses nothing that was promised, because the API never promised a queue message. The later publish gap is still ahead of us.
+
+### Failure scenarios
+
+- Unknown type or a JSON array payload: 400, no row.
+- SQL Server not configured: 503, no row.
+- SQL Server down after configuration: 503. The repository does not report success.
+- Unknown id: 404.
+- Page size above 100, or `createdFrom` after `createdTo`: 400, no query.
+- Process restart: the row is still there. The in-memory object from Phase 1 was not.
+
+### Why this design?
+
+The repository is the only place that knows EF. Application code asks for a `Job` and gets a `Job`. That kept the state-machine tests free of SQL, and let the new tests prove the mapping separately.
+
+`Pending` is the honest initial status. The contract already said not to claim `Queued` when the publish did not happen.
+
+Command logging for EF is `Warning` in `appsettings.json`. Information-level command logs include parameter values, and one of those values is the payload.
+
+### Alternatives
+
+- Store the status only after a fake in-memory queue accepts it. Rejected: that would be a queue that is not RabbitMQ.
+- Use EF InMemory for the integration tests. Rejected: it does not run this migration or these indexes.
+- Auto-migrate on every API startup. Rejected: `dotnet run` would then require SQL Server just to serve `GET /`. Migration is an explicit `dotnet ef database update`, and the tests call `Migrate` on their container.
+- Mark the job `Queued` anyway, to match the happy-path diagram. Rejected: the diagram includes a publish. This phase does not.
+
+### Tradeoffs
+
+You can restart the API and still fetch the job. You cannot show a worker picking it up. The allow-list of types is a stand-in for the handler registry; a type that is accepted today has no handler. Phase 3 has to keep those names in sync.
+
+Testcontainers makes the SQL tests slower and requires Docker. The unit tests still run without it. The 503 behavior is tested without a container.
+
+### Interview questions
+
+1. Why is a newly created job `Pending` instead of `Queued`?
+2. What is saved in SQL Server, and what is deliberately not sent anywhere?
+3. Why is the payload absent from the log line?
+4. What does 503 mean here, and what does 400 mean?
+5. How do you know the attempt mapping works if the API never creates an attempt?
+
+### Interview answers
+
+1. `Queued` means the broker has been asked to deliver the job id. This phase only commits the row. `JobApiTests` asserts the response status is `Pending`.
+2. The job row holds type, payload, status, attempt budget, timestamps, and correlation id. Attempts are a child table. No message is published.
+3. The payload can be large and may contain user data. The log line has job id, type, status, and correlation id. EF command logging is set to Warning so parameter values are not written at the default level.
+4. 400 is a bad request: unknown type, bad payload, bad page. 503 means the database is missing or unreachable, and the call did not pretend to store the job.
+5. `JobPersistenceTests` builds a succeeded job with `Job.StartProcessing` and `CompleteSuccessfully`, saves it, then loads it with a new context. The attempt number, worker, outcome, and two-second duration come back.
+
+### Deep dive
+
+#### EF and a constructor that has no setters
+
+`Job.Id`, `Type`, `Payload`, `MaxAttempts`, `CreatedAt`, and `CorrelationId` have no setters. EF will not map a get-only property it has not been told about, and it can only fill those values through the constructor. The first migration attempt failed on `maxAttempts` until `JobConfiguration` mapped `MaxAttempts` explicitly. The private constructor parameter names match the properties, so EF calls that constructor and then uses private setters for `Status` and the timestamps.
+
+The attempt list is the field `_attempts`. The configuration points the `Attempts` navigation at that field. That is why a reload can show attempts even though nothing outside `Job` can add one.
+
+#### One transaction, and the gap we have not reached
+
+`SaveChanges` commits the insert or rolls it back. There is no second resource in the transaction. When Phase 3 publishes after that commit, a crash in between will leave a `Pending` row and no message. The row is still the truth. The API must not change it to `Queued` unless the publish returned success. That rule is why this phase stops at `Pending`.
+
+### Things I should remember
+
+- `POST /api/v1/jobs` stores a `Pending` job. It does not queue one.
+- 503 means the database was not used. 400 means the body was rejected.
+- The payload is in the row and not in the log.
+- Docker is required for the SQL Server tests, not for the unit tests.
+- The next task is a real RabbitMQ publish, and only then `MarkQueued`.
